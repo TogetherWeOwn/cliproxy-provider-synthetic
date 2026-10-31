@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	providerkit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 )
 
 const (
@@ -115,8 +117,11 @@ func quotaFromHeaders(headers http.Header) (quotaReading, bool) {
 	return quotaReading{}, false
 }
 
+// newQuotaHTTPClient follows the proxy that the kit's CachedQuota attaches to
+// each poll: the auth's proxy_url, else the host's global proxy-url.
 func newQuotaHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = providerkit.QuotaProxy
 	client := &http.Client{Transport: transport, Timeout: defaultQuotaTimeout}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
