@@ -1,8 +1,9 @@
-package synthetic
+package main
 
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	providerkit "github.com/TogetherWeOwn/cliproxy-provider-kit"
@@ -10,7 +11,59 @@ import (
 )
 
 // quotaProvider shares the same cache with the UsagePlugin, keyed by auth ID.
-type quotaProvider struct{ cache *providerkit.CachedQuota }
+type quotaProvider struct {
+	cache    *providerkit.CachedQuota
+	mu       sync.Mutex
+	readings map[string]timedReading
+}
+type timedReading struct {
+	reading    quotaReading
+	observedAt time.Time
+	expires    time.Time
+}
+
+// These observations are response-classification hints only. They never select
+// an account, avoid an account preemptively, or alter the host's scheduler.
+func (q *quotaProvider) remember(id string, reading quotaReading, observedAt time.Time) {
+	if id == "" {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	now := time.Now()
+	if q.readings == nil {
+		q.readings = make(map[string]timedReading)
+	}
+	for key, r := range q.readings {
+		if !now.Before(r.expires) {
+			delete(q.readings, key)
+		}
+	}
+	if current, ok := q.readings[id]; ok && current.observedAt.After(observedAt) {
+		return
+	}
+	q.readings[id] = timedReading{reading: reading, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
+}
+func (q *quotaProvider) latest(id string) *quotaReading {
+	if q == nil {
+		return nil
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	r, ok := q.readings[id]
+	if !ok || !time.Now().Before(r.expires) {
+		delete(q.readings, id)
+		return nil
+	}
+	reading := r.reading
+	return &reading
+}
+func quotaIdentity(id, index string) string {
+	if id != "" {
+		return id
+	}
+	return index
+}
 
 func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
 	q := &quotaProvider{}
@@ -19,10 +72,17 @@ func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
 		if err != nil {
 			return pluginapi.QuotaFetchResponse{}, err
 		}
-		reading, err := fetchQuota(ctx, client, endpoint, key)
+		url := endpoint
+		if url == "" {
+			url = selectedBase(upstreamBase) + "/v2/quotas"
+		}
+		// A header received while this poll is in flight is newer evidence.
+		observedAt := time.Now()
+		reading, err := fetchQuota(ctx, client, url, key)
 		if err != nil {
 			return pluginapi.QuotaFetchResponse{}, err
 		}
+		q.remember(quotaIdentity(req.AuthID, req.AuthIndex), reading, observedAt)
 		return normalizeQuota(reading), nil
 	})
 	return q
@@ -60,6 +120,7 @@ func (q *quotaProvider) HandleUsage(_ context.Context, record pluginapi.UsageRec
 		return
 	}
 	if reading, ok := quotaFromHeaders(record.ResponseHeaders); ok {
+		q.remember(quotaIdentity(record.AuthID, record.AuthIndex), reading, time.Now())
 		_ = q.cache.Store(pluginapi.QuotaFetchRequest{Provider: record.Provider, AuthID: record.AuthID, AuthIndex: record.AuthIndex}, normalizeQuota(reading))
 	}
 }

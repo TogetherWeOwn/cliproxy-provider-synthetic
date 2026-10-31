@@ -1,5 +1,5 @@
 // Adapted from TogetherWeOwn/cpa-plugin-subscription-pool at ad3cb9ecd0130b1b7a0ffb122d0d4685bd8e659b; MIT licensed.
-package synthetic
+package main
 
 import (
 	"context"
