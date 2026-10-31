@@ -55,3 +55,10 @@ func TestLegacyQuotaDoesNotClaimWeeklyCredits(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeQuotaMissingRemainingDoesNotInventQuota(t *testing.T) {
+	got := normalizeQuota(quotaReading{Shape: "planWeeklyLimit"})
+	if len(got.Groups) != 0 || len(got.Summary) != 0 {
+		t.Fatalf("missing remaining percentage must not create quota data: %+v", got)
+	}
+}

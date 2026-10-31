@@ -29,6 +29,9 @@ func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
 }
 
 func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
+	if reading.PercentRemaining == nil {
+		return pluginapi.QuotaFetchResponse{}
+	}
 	percent := clamp(*reading.PercentRemaining, 0, 100)
 	window, name, description := "weekly", "Weekly credits", "Next regeneration, not a full reset"
 	switch reading.Shape {
