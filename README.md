@@ -1,8 +1,9 @@
 # Synthetic provider for CLIProxyAPI
 
 First-class Synthetic API-key auth files, namespaced model discovery, OpenAI
-chat execution and read-only quota cards. Built on the published
-[`cliproxy-provider-kit` v0.1.0](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
+chat execution and read-only quota cards. Built on
+[`cliproxy-provider-kit`](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
+at `de8b318` (v0.1.0 plus quota proxy support)
 and tested with the **real CLIProxyAPI v8.0.48 C-ABI loader** (ABI 1, RPC schema 9).
 
 Multiple distinct-key auth files use the host's native routing and cooldowns.
@@ -79,7 +80,8 @@ and 2 MiB per SSE line. It does not change which account/model the host selects.
 
 `GET https://api.synthetic.new/v2/quotas` is read-only and uses Bearer auth.
 The quota client has a 15-second timeout, 1 MiB body cap, no redirects and
-redacted errors. The shared kit caches successful per-auth readings for 60
+redacted errors. It goes through the auth's `proxy_url`, else the host's global
+`proxy-url`, like inference. The shared kit caches successful per-auth readings for 60
 seconds. The UsagePlugin updates the same cache from `x-synthetic-quotas` headers,
 without polling. Expired observations are discarded, not projected or displayed
 as fresh; polling errors do not fabricate quota.
