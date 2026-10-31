@@ -118,11 +118,10 @@ func quotaFromHeaders(headers http.Header) (quotaReading, bool) {
 }
 
 // newQuotaHTTPClient follows the proxy that the kit's CachedQuota attaches to
-// each poll: the auth's proxy_url, else the host's global proxy-url.
+// each poll: the auth's proxy_url, else the host's global proxy-url. The kit
+// transport keeps pooled connections from crossing proxies.
 func newQuotaHTTPClient() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = providerkit.QuotaProxy
-	client := &http.Client{Transport: transport, Timeout: defaultQuotaTimeout}
+	client := &http.Client{Transport: providerkit.NewQuotaTransport(), Timeout: defaultQuotaTimeout}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}

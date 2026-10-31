@@ -3,7 +3,7 @@
 First-class Synthetic API-key auth files, namespaced model discovery, OpenAI
 chat execution and read-only quota cards. Built on
 [`cliproxy-provider-kit`](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
-at `f24cf1f` (v0.1.0 plus quota proxy support)
+at `de8b318` (v0.1.0 plus quota proxy support)
 and tested with the **real CLIProxyAPI v8.0.48 C-ABI loader** (ABI 1, RPC schema 9).
 
 Multiple distinct-key auth files use the host's native routing and cooldowns.
