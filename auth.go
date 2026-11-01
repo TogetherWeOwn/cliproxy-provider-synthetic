@@ -19,8 +19,8 @@ type authProvider struct {
 	owners map[[32]byte]string
 }
 
-func newAuthProvider() *authProvider {
-	return &authProvider{APIKeyAuth: kit.APIKeyAuth{Provider: provider, Validate: func(m map[string]any) error {
+func newAuthProvider() (*authProvider, error) {
+	p := &authProvider{APIKeyAuth: kit.APIKeyAuth{Provider: provider, Validate: func(m map[string]any) error {
 		if _, ok := m["id"]; ok {
 			return &pluginabi.Error{Code: "invalid_auth", Message: "auth identity is derived from the API key", HTTPStatus: 400}
 		}
@@ -29,6 +29,17 @@ func newAuthProvider() *authProvider {
 		}
 		return nil
 	}}, files: make(map[string][32]byte), owners: make(map[[32]byte]string)}
+	// The login page offers the optional plan field; Parse is the full
+	// ParseAuth pipeline below, including the duplicate-key guard, so a
+	// submitted key faces the same checks as an uploaded auth file.
+	login, err := kit.NewAPIKeyLogin(kit.APIKeyLoginConfig{Provider: provider, Parse: p.ParseAuth, Fields: []kit.APIKeyLoginField{
+		{Name: "plan", Label: "Plan", Description: "Synthetic plan: go, standard or big. Leave blank to skip.", Required: false},
+	}})
+	if err != nil {
+		return nil, err
+	}
+	p.APIKeyAuth.Login = login
+	return p, nil
 }
 
 func (p *authProvider) ParseAuth(ctx context.Context, r pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {

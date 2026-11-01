@@ -43,8 +43,18 @@ ownership; do not copy an existing key into another file during a rename.
 
 Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`, `label`
 and `disabled`. Fixed model namespace `synthetic/`; auth `prefix` does not
-replace it. Login/poll operations report API-key-only; refresh preserves storage
-and performs no upstream request. API keys cannot be refreshed by this plugin.
+replace it. Refresh preserves storage and performs no upstream request. API
+keys cannot be refreshed by this plugin.
+
+## Management-UI login
+
+The management UI's **Start Synthetic Login** card serves a kit login page that
+prompts for the API key and the optional `plan` hint, then submits them over an
+authenticated management POST (secrets travel in the POST body only, never in
+URLs, logs or process arguments). The submission runs the same ParseAuth
+validation and duplicate-key guard as an uploaded auth file, so submitting the
+same key twice is idempotent. On a remote host, set `CLIPROXY_BASE` to an
+`https://` base so both secrets are encrypted in transit.
 
 ## Models and execution
 
@@ -91,9 +101,10 @@ seconds. The UsagePlugin updates the same cache from `x-synthetic-quotas` header
 without polling. Expired observations are discarded, not projected or displayed
 as fresh; polling errors do not fabricate quota.
 
-Parser priority is `planWeeklyLimit` > `weeklyTokenLimit` >
-`rollingFiveHourLimit` > legacy `subscription`. Current weekly credits are shown
-as remaining fraction and percent. A regeneration timestamp is the **next
+Every shape the quota payload reports gets its own card: weekly
+(`planWeeklyLimit`, `weeklyTokenLimit`), rolling five-hour
+(`rollingFiveHourLimit`) and legacy `subscription`. Current weekly credits are
+shown as remaining fraction and percent. A regeneration timestamp is the **next
 increment, not a full weekly reset**. Legacy five-hour/subscription cards appear
 only if those shapes are actually returned. No numeric plan allowance is
 hard-coded. Quota reset is unsupported; a web-UI reset entitlement is not an API.

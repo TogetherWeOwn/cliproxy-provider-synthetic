@@ -17,15 +17,15 @@ type quotaProvider struct {
 	readings map[string]timedReading
 }
 type timedReading struct {
-	reading    quotaReading
+	readings   []quotaReading
 	observedAt time.Time
 	expires    time.Time
 }
 
 // These observations are response-classification hints only. They never select
 // an account, avoid an account preemptively, or alter the host's scheduler.
-func (q *quotaProvider) remember(id string, reading quotaReading, observedAt time.Time) {
-	if id == "" {
+func (q *quotaProvider) remember(id string, readings []quotaReading, observedAt time.Time) {
+	if id == "" || len(readings) == 0 {
 		return
 	}
 	q.mu.Lock()
@@ -42,9 +42,11 @@ func (q *quotaProvider) remember(id string, reading quotaReading, observedAt tim
 	if current, ok := q.readings[id]; ok && current.observedAt.After(observedAt) {
 		return
 	}
-	q.readings[id] = timedReading{reading: reading, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
+	kept := make([]quotaReading, len(readings))
+	copy(kept, readings)
+	q.readings[id] = timedReading{readings: kept, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
 }
-func (q *quotaProvider) latest(id string) *quotaReading {
+func (q *quotaProvider) latest(id string) []quotaReading {
 	if q == nil {
 		return nil
 	}
@@ -55,7 +57,19 @@ func (q *quotaProvider) latest(id string) *quotaReading {
 		delete(q.readings, id)
 		return nil
 	}
-	reading := r.reading
+	kept := make([]quotaReading, len(r.readings))
+	copy(kept, r.readings)
+	return kept
+}
+
+// latestOne returns the first remembered shape for the 429 RetryAfter hint,
+// preserving the historical first-match behavior.
+func (q *quotaProvider) latestOne(id string) *quotaReading {
+	readings := q.latest(id)
+	if len(readings) == 0 {
+		return nil
+	}
+	reading := readings[0]
 	return &reading
 }
 func quotaIdentity(id, index string) string {
@@ -78,12 +92,12 @@ func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
 		}
 		// A header received while this poll is in flight is newer evidence.
 		observedAt := time.Now()
-		reading, err := fetchQuota(ctx, client, url, key)
+		readings, err := fetchQuotas(ctx, client, url, key)
 		if err != nil {
 			return pluginapi.QuotaFetchResponse{}, err
 		}
-		q.remember(quotaIdentity(req.AuthID, req.AuthIndex), reading, observedAt)
-		return normalizeQuota(reading), nil
+		q.remember(quotaIdentity(req.AuthID, req.AuthIndex), readings, observedAt)
+		return normalizeQuotas(readings), nil
 	})
 	return q
 }
@@ -114,13 +128,29 @@ func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
 	return out
 }
 
+// normalizeQuotas emits one group per shape present, so a payload reporting
+// weekly credits alongside legacy request packs no longer hides the latter.
+// A single-shape input renders exactly as normalizeQuota renders it, and the
+// weekly summary comes from the first weekly shape.
+func normalizeQuotas(readings []quotaReading) pluginapi.QuotaFetchResponse {
+	out := pluginapi.QuotaFetchResponse{}
+	for _, reading := range readings {
+		one := normalizeQuota(reading)
+		out.Groups = append(out.Groups, one.Groups...)
+		if len(out.Summary) == 0 && len(one.Summary) > 0 {
+			out.Summary = one.Summary
+		}
+	}
+	return out
+}
+
 // HandleUsage consumes only provider-matched response headers and never persists keys.
 func (q *quotaProvider) HandleUsage(_ context.Context, record pluginapi.UsageRecord) {
 	if record.Provider != "synthetic" {
 		return
 	}
-	if reading, ok := quotaFromHeaders(record.ResponseHeaders); ok {
-		q.remember(quotaIdentity(record.AuthID, record.AuthIndex), reading, time.Now())
-		_ = q.cache.Store(pluginapi.QuotaFetchRequest{Provider: record.Provider, AuthID: record.AuthID, AuthIndex: record.AuthIndex}, normalizeQuota(reading))
+	if readings, ok := quotaReadingsFromHeaders(record.ResponseHeaders); ok {
+		q.remember(quotaIdentity(record.AuthID, record.AuthIndex), readings, time.Now())
+		_ = q.cache.Store(pluginapi.QuotaFetchRequest{Provider: record.Provider, AuthID: record.AuthID, AuthIndex: record.AuthIndex}, normalizeQuotas(readings))
 	}
 }
