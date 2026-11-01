@@ -3,8 +3,9 @@
 First-class Synthetic API-key auth files, namespaced model discovery, OpenAI
 chat execution and read-only quota cards. Built on
 [`cliproxy-provider-kit`](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
-at `c81b686` (accepts newer host RPC schemas, still answers schema 9)
-and tested with the **real CLIProxyAPI v8.0.48 C-ABI loader** (ABI 1, RPC schema 9).
+at `21069bf` (v8.0.49 plugin ABI: answers RPC schema 10, refuses hosts older than schema 10)
+and tested with the **real CLIProxyAPI v8.0.49 C-ABI loader** (ABI 1, RPC schema 10).
+Requires CLIProxyAPI v8.0.49 or newer.
 
 Multiple distinct-key auth files use the host's native routing and cooldowns.
 There is **no Scheduler**, preemptive quota-percentage avoidance, separate
@@ -108,7 +109,7 @@ Bodies and secrets are never included in public error messages.
 
 ### Pinned host RPC limitation
 
-The v8.0.48 `internal/pluginhost/rpc_client.go` error adapter carries HTTP status
+The v8.0.49 `internal/pluginhost/rpc_client.go` error adapter carries HTTP status
 and retry timing, but does **not** implement the native transient-rate-limit
 marker or preserve the RPC `retryable` flag. Consequently a concurrency-only 429
 can still set `ModelStates[model].Quota.Exceeded` in native cooldown handling,
@@ -137,7 +138,7 @@ nm -D <output-dir>/synthetic.so | grep cliproxy_plugin_init
 bash scripts/package-release.sh <output-dir>
 ```
 
-The package script creates `synthetic_0.1.1_linux_amd64.zip` containing
+The package script creates `synthetic_0.1.2_linux_amd64.zip` containing
 `synthetic.so` and `LICENSE`, plus `checksums.txt` for the archive. It does not
 publish, install or reload anything. Publish both files together to a matching
 GitHub release; `registry.json` uses the native schema-v1 GitHub-release contract.
@@ -170,5 +171,5 @@ suite, and no live-account validation is claimed.**
 - [Quota API](https://dev.synthetic.new/docs/synthetic/quotas)
 - [Weekly regeneration](https://synthetic.new/rate-limits)
 - [Official client quota shapes](https://github.com/synthetic-lab/octofriend/blob/main/source/utils/quota.ts)
-- [Pinned host source](https://github.com/router-for-me/CLIProxyAPI/tree/v8.0.48)
+- [Pinned host source](https://github.com/router-for-me/CLIProxyAPI/tree/v8.0.49)
 - [Parser provenance](docs/PROVENANCE.md)
