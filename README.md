@@ -75,7 +75,8 @@ or an upstream billable operation.
 is aggregated into one `chat.completion`, including indexed choices, fragmented
 tool calls, reasoning and summed reported usage. Truncated/malformed streams
 fail rather than invent a successful result. Aggregation is bounded to 32 MiB
-and 2 MiB per SSE line. It does not change which account/model the host selects.
+total; each upstream event is additionally bounded by the kit's 8 MiB SSE event
+limit. It does not change which account/model the host selects.
 
 ## Quota and failure classification
 

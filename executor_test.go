@@ -148,7 +148,13 @@ func TestExecutorInfiniteAggregatesSSEAndOrdinaryNonstreamUntouched(t *testing.T
 }
 
 func TestInfiniteRejectsMalformedTruncatedAndCanceledStream(t *testing.T) {
-	for _, sse := range []string{"data: not-json\n\n", "data: {}\n\n", "data: [DONE]\n\n", strings.TrimSuffix(infiniteSSE, "data: [DONE]\n\n")} {
+	// Channel close is the terminal marker (the kit drops [DONE] before these
+	// chunks reach the plugin), so a stream cut after complete events is
+	// indistinguishable from a complete one. Truncation is still caught when
+	// the last event never finished: the first infiniteSSE event alone carries
+	// no finish reason.
+	firstEventOnly := infiniteSSE[:strings.Index(infiniteSSE, "\n\n")+2]
+	for _, sse := range []string{"data: not-json\n\n", "data: {}\n\n", "data: [DONE]\n\n", firstEventOnly} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			io.WriteString(w, sse)
