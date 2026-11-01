@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -102,36 +101,47 @@ func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
 	return q
 }
 
-func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
-	if reading.PercentRemaining == nil {
-		return pluginapi.QuotaFetchResponse{}
-	}
-	percent := clamp(*reading.PercentRemaining, 0, 100)
-	window, name, description := "weekly", "Weekly credits", "Next regeneration, not a full reset"
-	switch reading.Shape {
+// shapeWindow maps a quota shape to its card row label. Weekly shapes share
+// the canonical weekly label and the legacy request pack gets the canonical
+// 5-hour label; subscription is a distinct legacy shape with no canonical
+// spelling, so it keeps its own name.
+func shapeWindow(shape string) string {
+	switch shape {
 	case "rollingFiveHourLimit":
-		window, name, description = "5h", "Legacy request limit", "Next regeneration, not a full reset"
+		return providerkit.QuotaWindowLabel("5h")
 	case "subscription":
-		window, name, description = "subscription", "Legacy subscription", "Subscription renewal"
+		return "subscription"
+	default:
+		return providerkit.QuotaWindowLabel("weekly")
 	}
-	bucket := pluginapi.QuotaBucket{Window: window, RemainingFraction: percent / 100, Description: description}
-	if !reading.NextRegenAt.IsZero() {
-		bucket.ResetTime = reading.NextRegenAt.Format(time.RFC3339Nano)
-	}
-	if reading.NextRegenPercent != nil {
-		bucket.Description += fmt.Sprintf(" (next increment %.2g%%)", *reading.NextRegenPercent)
-	}
-	out := pluginapi.QuotaFetchResponse{Groups: []pluginapi.QuotaGroup{{DisplayName: name, Buckets: []pluginapi.QuotaBucket{bucket}}}}
-	if window == "weekly" {
-		out.Summary = []pluginapi.QuotaMetric{{Key: "weekly_credits_remaining_percent", Label: "Remaining", Value: percent, Unit: "%", Format: "number"}}
-	}
-	return out
 }
 
-// normalizeQuotas emits one group per shape present, so a payload reporting
-// weekly credits alongside legacy request packs no longer hides the latter.
-// A single-shape input renders exactly as normalizeQuota renders it, and the
-// weekly summary comes from the first weekly shape.
+// quotaBucket renders one shape as a bar row: a short window label, the
+// remaining fraction, and the reset time. It never sets Description, so the
+// panel shows the Window label instead of a sentence. ok is false when the
+// reading carries no remaining percentage, so nothing is invented.
+func quotaBucket(reading quotaReading) (bucket pluginapi.QuotaBucket, ok bool) {
+	if reading.PercentRemaining == nil {
+		return pluginapi.QuotaBucket{}, false
+	}
+	reset := ""
+	if !reading.NextRegenAt.IsZero() {
+		reset = reading.NextRegenAt.Format(time.RFC3339)
+	}
+	return providerkit.NewQuotaBucket(shapeWindow(reading.Shape), clamp(*reading.PercentRemaining, 0, 100)/100, reset), true
+}
+
+// normalizeQuota renders a single shape exactly as normalizeQuotas renders a
+// one-shape payload.
+func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
+	return normalizeQuotas([]quotaReading{reading})
+}
+
+// normalizeQuotas emits one Synthetic group with one bucket per shape
+// present, so a payload reporting weekly credits alongside legacy request
+// packs no longer hides the latter. The next-increment chip comes from the
+// first shape reporting a non-zero one; a zero or absent increment shows no
+// chip instead of a "0%" row.
 // planWeeklyLimit and weeklyTokenLimit are the same bucket in current and
 // legacy form: when both are present only the current plan shape is rendered.
 func normalizeQuotas(readings []quotaReading) pluginapi.QuotaFetchResponse {
@@ -143,15 +153,22 @@ func normalizeQuotas(readings []quotaReading) pluginapi.QuotaFetchResponse {
 			break
 		}
 	}
+	group := pluginapi.QuotaGroup{DisplayName: "Synthetic"}
 	for _, reading := range readings {
 		if hasPlanWeekly && reading.Shape == "weeklyTokenLimit" {
 			continue
 		}
-		one := normalizeQuota(reading)
-		out.Groups = append(out.Groups, one.Groups...)
-		if len(out.Summary) == 0 && len(one.Summary) > 0 {
-			out.Summary = one.Summary
+		bucket, ok := quotaBucket(reading)
+		if !ok {
+			continue
 		}
+		group.Buckets = append(group.Buckets, bucket)
+		if len(out.Summary) == 0 && reading.NextRegenPercent != nil && *reading.NextRegenPercent != 0 {
+			out.Summary = []pluginapi.QuotaMetric{{Key: "next_increment_percent", Label: "Next increment", Value: *reading.NextRegenPercent, Unit: "%", Format: "number"}}
+		}
+	}
+	if len(group.Buckets) > 0 {
+		out.Groups = []pluginapi.QuotaGroup{group}
 	}
 	return out
 }

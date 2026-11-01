@@ -54,7 +54,7 @@ func TestParseQuotaPrefersPlanWeeklyOverLegacyToken(t *testing.T) {
 		{PercentRemaining: floatPtr(72.5), Shape: "planWeeklyLimit"},
 		{PercentRemaining: floatPtr(40), Shape: "weeklyTokenLimit"},
 	})
-	if len(got.Groups) != 1 || got.Groups[0].DisplayName != "Weekly credits" || got.Groups[0].Buckets[0].Window != "weekly" {
+	if len(got.Groups) != 1 || got.Groups[0].DisplayName != "Synthetic" || got.Groups[0].Buckets[0].Window != "Weekly limit" {
 		t.Fatalf("dual weekly shapes must render one weekly card: %+v", got)
 	}
 	// Legacy token shape alone still renders the weekly card.

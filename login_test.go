@@ -52,7 +52,10 @@ func TestAPIKeyLoginWired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(start.URL, "http://127.0.0.1:19000"+testResourceBase+"/login?state=") {
+	// Root-relative on purpose: an absolute loopback URL would hand a remote
+	// operator's browser a link it cannot load; the panel opens the relative
+	// URL against its own origin (the host, which serves the panel).
+	if !strings.HasPrefix(start.URL, testResourceBase+"/login?state=") || strings.Contains(start.URL, "://") {
 		t.Fatalf("unexpected login URL %q", start.URL)
 	}
 	poll, err := p.PollLogin(ctx, pluginapi.AuthLoginPollRequest{State: start.State})
