@@ -42,8 +42,8 @@ files requires a plugin lifecycle restart to clear its in-memory duplicate-file
 ownership; do not copy an existing key into another file during a rename.
 
 Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`, `label`
-and `disabled`. The optional auth `prefix` does not replace the fixed model
-namespace. Login/poll operations report API-key-only; refresh preserves storage
+and `disabled`. Fixed model namespace `synthetic/`; auth `prefix` does not
+replace it. Login/poll operations report API-key-only; refresh preserves storage
 and performs no upstream request. API keys cannot be refreshed by this plugin.
 
 ## Models and execution
