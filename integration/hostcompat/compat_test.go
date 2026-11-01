@@ -47,7 +47,7 @@ func TestRealHostLoader(t *testing.T) {
 	var polls atomic.Int32
 	gate := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer example-key" && r.Header.Get("Authorization") != "Bearer second-key" {
+		if r.Header.Get("Authorization") != "Bearer example-key" && r.Header.Get("Authorization") != "Bearer second-key" && r.Header.Get("Authorization") != "Bearer pinned-key" {
 			t.Error("incorrect authorization")
 		}
 		switch r.URL.Path {
@@ -149,7 +149,7 @@ func TestRealHostLoader(t *testing.T) {
 		t.Fatalf("registration %+v", host.RegisteredPlugins())
 	}
 	info := host.RegisteredPlugins()
-	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.1.2" {
+	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.1.3" {
 		t.Fatalf("metadata %+v", info)
 	}
 	auth, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "example.json", RawJSON: []byte(`{"type":"synthetic","api_key":"example-key","label":"Example"}`)})
@@ -336,6 +336,55 @@ func TestRealHostLoader(t *testing.T) {
 		}
 		t.Log("v8.0.49 RPC drops the transient marker and marks concurrency 429 as model quota exceeded")
 	})
+	t.Run("pinned prefix routes and strips end to end", func(t *testing.T) {
+		pinned, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "pinned.json", RawJSON: []byte(`{"type":"synthetic","api_key":"pinned-key","prefix":"acct"}`)})
+		if err != nil || !handled || pinned == nil {
+			t.Fatalf("pinned auth %v %v", handled, err)
+		}
+		if pinned.Prefix != "acct" {
+			t.Fatalf("host did not round-trip the auth prefix: %+v", pinned)
+		}
+		if _, _, err = host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "squat.json", RawJSON: []byte(`{"type":"synthetic","api_key":"other-key","prefix":"acct"}`)}); err == nil {
+			t.Fatal("second credential accepted under a claimed prefix")
+		}
+		mgr := coreauth.NewManager(nil, nil, nil)
+		mgr.SetRetryConfig(0, 0, 1)
+		mgr.RegisterExecutor(ex)
+		one := pinned.Clone()
+		one.ID = "pinned-auth"
+		one.Status = coreauth.StatusActive
+		if _, err := mgr.Register(ctx, one); err != nil {
+			t.Fatal(err)
+		}
+		model := "acct/synthetic/syn:small:text"
+		registry.GetGlobalRegistry().RegisterClient(one.ID, one.Provider, []*registry.ModelInfo{{ID: "synthetic/syn:small:text"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(one.ID) })
+		// The connector addresses the pinned member by its pinned id, so the
+		// payload model carries the host prefix while the route model is
+		// already prefix-stripped for upstream dispatch. The mock upstream
+		// above rejects anything but the bare id.
+		resp, err := mgr.Execute(ctx, []string{"synthetic"}, coreexec.Request{Model: model, Payload: []byte(`{"model":"acct/synthetic/syn:small:text","messages":[{"role":"user","content":"hello"}]}`), Format: translator.FormatOpenAI}, opts)
+		if err != nil || !strings.Contains(string(resp.Payload), `"content":"hello"`) {
+			t.Fatalf("pinned execute %s %v", resp.Payload, err)
+		}
+	})
+	t.Run("prefix normalization matches the filestore end to end", func(t *testing.T) {
+		// A trailing slash normalizes at parse: the plugin reports "trail"
+		// and the real host round-trips it, exactly as for a filestore auth.
+		trail, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "trail.json", RawJSON: []byte(`{"type":"synthetic","api_key":"trail-key","prefix":"trail/"}`)})
+		if err != nil || !handled || trail == nil {
+			t.Fatalf("trailing-slash auth %v %v", handled, err)
+		}
+		if trail.Prefix != "trail" {
+			t.Fatalf("trailing slash not normalized end to end: %+v", trail)
+		}
+		// An inner slash would pin verbatim on the plugin path and merge
+		// pinning namespaces, so the plugin rejects it instead of silently
+		// treating it as unpinned.
+		if _, _, err = host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "slash.json", RawJSON: []byte(`{"type":"synthetic","api_key":"slash-key","prefix":"a/b"}`)}); err == nil {
+			t.Fatal("slash-bearing prefix accepted at parse")
+		}
+	})
 }
 
 func TestRegistryUsesNativeStoreSchema(t *testing.T) {
@@ -344,7 +393,7 @@ func TestRegistryUsesNativeStoreSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg, err := pluginstore.ParseRegistry(raw)
-	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "synthetic" || reg.Plugins[0].Version != "0.1.2" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
+	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "synthetic" || reg.Plugins[0].Version != "0.1.3" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
 		t.Fatalf("registry %+v %v", reg, err)
 	}
 }

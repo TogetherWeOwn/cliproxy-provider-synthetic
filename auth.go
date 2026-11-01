@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"sync"
 
 	kit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -11,12 +9,12 @@ import (
 )
 
 // Ownership is by filename, so a watcher's repeated parse of one file is safe.
-// Only digests are retained; keys never appear in duplicate-file errors.
+// Prefix and duplicate-key ownership lives in the shared kit tracker (G-K1):
+// two credentials must never share one host prefix, or their pinning
+// namespaces merge. Only digests are retained; keys never appear in errors.
 type authProvider struct {
 	kit.APIKeyAuth
-	mu     sync.Mutex
-	files  map[string][32]byte
-	owners map[[32]byte]string
+	claims kit.PrefixClaims
 }
 
 func newAuthProvider() *authProvider {
@@ -28,7 +26,7 @@ func newAuthProvider() *authProvider {
 			return &pluginabi.Error{Code: "invalid_auth", Message: "plan must be go, standard or big", HTTPStatus: 400}
 		}
 		return nil
-	}}, files: make(map[string][32]byte), owners: make(map[[32]byte]string)}
+	}}}
 }
 
 func (p *authProvider) ParseAuth(ctx context.Context, r pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
@@ -40,16 +38,8 @@ func (p *authProvider) ParseAuth(ctx context.Context, r pluginapi.AuthParseReque
 	if err != nil {
 		return pluginapi.AuthParseResponse{}, err
 	}
-	digest := sha256.Sum256([]byte(key))
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if file, ok := p.owners[digest]; ok && file != r.FileName {
-		return pluginapi.AuthParseResponse{}, &pluginabi.Error{Code: "duplicate_auth", Message: "the same API key is already configured in another auth file", HTTPStatus: 400}
+	if err := p.claims.Claim(r.FileName, out.Auth.Prefix, []byte(key)); err != nil {
+		return pluginapi.AuthParseResponse{}, err
 	}
-	if old, ok := p.files[r.FileName]; ok && old != digest {
-		delete(p.owners, old)
-	}
-	p.files[r.FileName] = digest
-	p.owners[digest] = r.FileName
 	return out, nil
 }

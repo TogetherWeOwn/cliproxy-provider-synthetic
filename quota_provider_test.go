@@ -56,6 +56,29 @@ func TestLegacyQuotaDoesNotClaimWeeklyCredits(t *testing.T) {
 	}
 }
 
+func TestSubscriptionSummaryReportsAbsoluteCounters(t *testing.T) {
+	r, err := parseQuota([]byte(`{"subscription":{"limit":135,"requests":27,"renewsAt":"2025-09-21T14:36:14.288Z"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := normalizeQuota(r)
+	if len(got.Groups) != 1 || got.Groups[0].Buckets[0].Window != "subscription" || got.Groups[0].Buckets[0].RemainingFraction != 0.8 {
+		t.Fatalf("subscription bucket wrong: %+v", got)
+	}
+	used, limit := -1.0, -1.0
+	for _, metric := range got.Summary {
+		switch metric.Key {
+		case "subscription_requests_used":
+			used = metric.Value
+		case "subscription_request_limit":
+			limit = metric.Value
+		}
+	}
+	if used != 27 || limit != 135 {
+		t.Fatalf("subscription absolutes missing from Summary: %+v", got.Summary)
+	}
+}
+
 func TestNormalizeQuotaMissingRemainingDoesNotInventQuota(t *testing.T) {
 	got := normalizeQuota(quotaReading{Shape: "planWeeklyLimit"})
 	if len(got.Groups) != 0 || len(got.Summary) != 0 {

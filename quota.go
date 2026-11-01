@@ -31,7 +31,12 @@ type quotaReading struct {
 	PercentRemaining *float64
 	NextRegenAt      time.Time
 	NextRegenPercent *float64
-	Shape            string
+	// Limit and Requests carry the subscription shape's absolute counters so
+	// the normalized Summary can report them (G-S3). Other shapes leave both
+	// nil; the parser never fabricates a value that was not reported.
+	Limit    *float64
+	Requests *float64
+	Shape    string
 }
 
 func (q quotaReading) utilization() *float64 {
@@ -94,7 +99,7 @@ func parseQuota(raw []byte) (quotaReading, error) {
 		return reading, nil
 	case wire.Subscription != nil && wire.Subscription.Limit != nil && wire.Subscription.Requests != nil && *wire.Subscription.Limit > 0:
 		w := wire.Subscription
-		return quotaReading{PercentRemaining: floatPtr((*w.Limit - *w.Requests) / *w.Limit * 100), NextRegenAt: parseTime(w.RenewsAt), Shape: "subscription"}, nil
+		return quotaReading{PercentRemaining: floatPtr((*w.Limit - *w.Requests) / *w.Limit * 100), NextRegenAt: parseTime(w.RenewsAt), Limit: floatPtr(*w.Limit), Requests: floatPtr(*w.Requests), Shape: "subscription"}, nil
 	default:
 		return quotaReading{}, errNoQuotaShape
 	}
