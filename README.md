@@ -101,13 +101,17 @@ seconds. The UsagePlugin updates the same cache from `x-synthetic-quotas` header
 without polling. Expired observations are discarded, not projected or displayed
 as fresh; polling errors do not fabricate quota.
 
-Every shape the quota payload reports gets its own card: weekly
-(`planWeeklyLimit`, `weeklyTokenLimit`), rolling five-hour
-(`rollingFiveHourLimit`) and legacy `subscription`. Current weekly credits are
-shown as remaining fraction and percent. A regeneration timestamp is the **next
-increment, not a full weekly reset**. Legacy five-hour/subscription cards appear
-only if those shapes are actually returned. No numeric plan allowance is
-hard-coded. Quota reset is unsupported; a web-UI reset entitlement is not an API.
+Every shape the quota payload reports gets one bucket in a single `Synthetic`
+group: weekly (`planWeeklyLimit`, `weeklyTokenLimit`), rolling five-hour
+(`rollingFiveHourLimit`) and legacy `subscription`. Buckets carry the window
+label only, with no description. A regeneration timestamp is the **next
+increment, not a full weekly reset**, so it is shown only alongside the
+`Next refill` chip that names the increment, or for `subscription` renewals,
+which do reset the allowance. The refill chip prefers the weekly increment;
+a five-hour tick appears only when no weekly shape reports one. Legacy
+five-hour/subscription buckets appear only if those shapes are actually
+returned. No numeric plan allowance is hard-coded. Quota reset is unsupported;
+a web-UI reset entitlement is not an API.
 
 | Upstream result | Plugin classification | Retry guidance |
 | --- | --- | --- |

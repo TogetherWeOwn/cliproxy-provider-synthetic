@@ -89,11 +89,22 @@ func TestMultiShapeQuotaEmitsOneBucketPerShape(t *testing.T) {
 		t.Fatalf("expected one bucket per shape, got %+v", got)
 	}
 	windows := map[string]float64{}
+	resets := map[string]string{}
 	for _, b := range got.Groups[0].Buckets {
 		windows[b.Window] = b.RemainingFraction
+		resets[b.Window] = b.ResetTime
 		if b.Description != "" {
 			t.Fatalf("bucket %+v carries description text", b)
 		}
+	}
+	// The weekly nextRegenAt is an incremental refill with no quantified
+	// increment here, so it must not pose as a reset; the subscription
+	// renewal is a genuine reset and keeps its timestamp.
+	if resets["Weekly credits"] != "" {
+		t.Fatalf("incremental refill shown as reset: %+v", got)
+	}
+	if resets["Subscription"] == "" {
+		t.Fatalf("renewal lost its reset time: %+v", got)
 	}
 	if windows["Weekly credits"] != 0.25 || windows[providerkit.CardWindowFiveHour] != 0.5 || windows["Subscription"] != 0.6 {
 		t.Fatalf("wrong per-shape fractions: %+v", got)
@@ -133,5 +144,24 @@ func TestNextRefillChipOnlyWhenNonZero(t *testing.T) {
 	}
 	if got := regen(nil); len(got.Summary) != 0 {
 		t.Fatalf("missing refill must not emit a chip: %+v", got)
+	}
+}
+
+// The refill chip prefers a weekly increment over a five-hour tick, so the
+// chip next to the weekly bar never names the wrong refill. A lone
+// five-hour tick keeps its chip.
+func TestRefillChipPrefersWeeklyOverFiveHourTick(t *testing.T) {
+	weekly := quotaReading{Shape: "planWeeklyLimit", PercentRemaining: floatPtr(25), NextRegenPercent: floatPtr(2)}
+	tick := quotaReading{Shape: "rollingFiveHourLimit", PercentRemaining: floatPtr(50), NextRegenPercent: floatPtr(10)}
+	got := normalizeQuotas([]quotaReading{weekly, tick})
+	if len(got.Groups) != 1 || len(got.Summary) != 1 || got.Summary[0].Value != 2 {
+		t.Fatalf("weekly refill must win: %+v", got)
+	}
+	if violations := providerkit.CheckCard(got); len(violations) != 0 {
+		t.Fatalf("CheckCard violations: %v", violations)
+	}
+	lone := normalizeQuotas([]quotaReading{tick})
+	if len(lone.Summary) != 1 || lone.Summary[0].Value != 10 {
+		t.Fatalf("lone five-hour tick lost its chip: %+v", lone)
 	}
 }

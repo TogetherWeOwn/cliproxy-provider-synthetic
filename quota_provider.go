@@ -107,19 +107,24 @@ func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
 	}
 	percent := clamp(*reading.PercentRemaining, 0, 100)
 	window := "Weekly credits"
+	fullReset := false
 	switch reading.Shape {
 	case "rollingFiveHourLimit":
 		window = providerkit.CardWindowFiveHour
 	case "subscription":
 		window = "Subscription"
+		fullReset = true
 	}
 	bucket := pluginapi.QuotaBucket{Window: window, RemainingFraction: percent / 100}
-	if !reading.NextRegenAt.IsZero() {
-		bucket.ResetTime = reading.NextRegenAt.Format(time.RFC3339Nano)
-	}
 	out := pluginapi.QuotaFetchResponse{Groups: []pluginapi.QuotaGroup{{DisplayName: "Synthetic", Buckets: []pluginapi.QuotaBucket{bucket}}}}
 	if reading.NextRegenPercent != nil && *reading.NextRegenPercent != 0 {
 		out.Summary = []pluginapi.QuotaMetric{{Key: "next_refill_percent", Label: "Next refill", Value: *reading.NextRegenPercent, Unit: "%", Format: "number"}}
+	}
+	// NextRegenAt marks an incremental refill, not a full reset. Surface it as
+	// the row's reset time only alongside the refill chip that names the
+	// increment, or for subscription renewals, which do reset the allowance.
+	if !reading.NextRegenAt.IsZero() && (len(out.Summary) > 0 || fullReset) {
+		out.Groups[0].Buckets[0].ResetTime = reading.NextRegenAt.Format(time.RFC3339Nano)
 	}
 	return out
 }
@@ -128,13 +133,15 @@ func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
 // bucket per shape, so a payload reporting weekly credits alongside legacy
 // request packs no longer hides the latter — and the panel renders one group
 // header instead of a repeated header per shape. A single-shape input renders
-// exactly as normalizeQuota renders it, and the weekly summary comes from
-// the first weekly shape.
+// exactly as normalizeQuota renders it. The refill chip comes from the first
+// weekly shape that reports one; a non-weekly tick is kept only when no
+// weekly shape reports one, so single-shape payloads keep their chip without
+// a five-hour tick posing as the weekly refill.
 // planWeeklyLimit and weeklyTokenLimit are the same bucket in current and
 // legacy form: when both are present only the current plan shape is rendered.
 func normalizeQuotas(readings []quotaReading) pluginapi.QuotaFetchResponse {
 	var buckets []pluginapi.QuotaBucket
-	var summary []pluginapi.QuotaMetric
+	var summary, fallback []pluginapi.QuotaMetric
 	hasPlanWeekly := false
 	for _, reading := range readings {
 		if reading.Shape == "planWeeklyLimit" && reading.PercentRemaining != nil {
@@ -150,9 +157,22 @@ func normalizeQuotas(readings []quotaReading) pluginapi.QuotaFetchResponse {
 		for _, g := range one.Groups {
 			buckets = append(buckets, g.Buckets...)
 		}
-		if len(summary) == 0 && len(one.Summary) > 0 {
-			summary = one.Summary
+		if len(one.Summary) == 0 {
+			continue
 		}
+		switch reading.Shape {
+		case "planWeeklyLimit", "weeklyTokenLimit":
+			if len(summary) == 0 {
+				summary = one.Summary
+			}
+		default:
+			if len(fallback) == 0 {
+				fallback = one.Summary
+			}
+		}
+	}
+	if len(summary) == 0 {
+		summary = fallback
 	}
 	out := pluginapi.QuotaFetchResponse{Summary: summary}
 	if len(buckets) > 0 {
