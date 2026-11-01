@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	providerkit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 )
 
 func TestParseQuotaShapes(t *testing.T) {
@@ -54,8 +56,11 @@ func TestParseQuotaPrefersPlanWeeklyOverLegacyToken(t *testing.T) {
 		{PercentRemaining: floatPtr(72.5), Shape: "planWeeklyLimit"},
 		{PercentRemaining: floatPtr(40), Shape: "weeklyTokenLimit"},
 	})
-	if len(got.Groups) != 1 || got.Groups[0].DisplayName != "Weekly credits" || got.Groups[0].Buckets[0].Window != "weekly" {
+	if len(got.Groups) != 1 || got.Groups[0].DisplayName != "Synthetic" || got.Groups[0].Buckets[0].Window != "Weekly credits" {
 		t.Fatalf("dual weekly shapes must render one weekly card: %+v", got)
+	}
+	if violations := providerkit.CheckCard(got); len(violations) != 0 {
+		t.Fatalf("CheckCard violations: %+v", violations)
 	}
 	// Legacy token shape alone still renders the weekly card.
 	legacy, err := parseQuotas([]byte(`{"weeklyTokenLimit":{"percentRemaining":40,"nextRegenAt":"2026-10-23T09:00:00Z"}}`))
