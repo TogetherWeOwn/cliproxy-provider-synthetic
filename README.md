@@ -3,7 +3,7 @@
 First-class Synthetic API-key auth files, namespaced model discovery, OpenAI
 chat execution and read-only quota cards. Built on
 [`cliproxy-provider-kit`](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
-at `21069bf` (v8.0.49 plugin ABI: answers RPC schema 10, refuses hosts older than schema 10)
+at `88850ce` (v8.0.49 plugin ABI: answers RPC schema 10, refuses hosts older than schema 10)
 and tested with the **real CLIProxyAPI v8.0.49 C-ABI loader** (ABI 1, RPC schema 10).
 Requires CLIProxyAPI v8.0.49 or newer.
 
