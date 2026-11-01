@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
-	"sync"
+	"time"
 
 	kit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -12,14 +12,22 @@ import (
 
 // Ownership is by filename, so a watcher's repeated parse of one file is safe.
 // Only digests are retained; keys never appear in duplicate-file errors.
+// kit.KeyOwnership keeps that split provisional-aware: host parses of real
+// auth files commit ownership, while a login-validation parse only reserves
+// the digest until the login session expires, so an abandoned login releases
+// the key instead of holding it until plugin restart.
 type authProvider struct {
 	kit.APIKeyAuth
-	mu     sync.Mutex
-	files  map[string][32]byte
-	owners map[[32]byte]string
+	guard kit.KeyOwnership
 }
 
 func newAuthProvider() (*authProvider, error) {
+	return newAuthProviderWithLoginTTL(0)
+}
+
+// newAuthProviderWithLoginTTL exists for tests that need a login session to
+// expire promptly; a zero TTL keeps the kit default.
+func newAuthProviderWithLoginTTL(loginTTL time.Duration) (*authProvider, error) {
 	p := &authProvider{APIKeyAuth: kit.APIKeyAuth{Provider: provider, Validate: func(m map[string]any) error {
 		if _, ok := m["id"]; ok {
 			return &pluginabi.Error{Code: "invalid_auth", Message: "auth identity is derived from the API key", HTTPStatus: 400}
@@ -28,11 +36,14 @@ func newAuthProvider() (*authProvider, error) {
 			return &pluginabi.Error{Code: "invalid_auth", Message: "plan must be go, standard or big", HTTPStatus: 400}
 		}
 		return nil
-	}}, files: make(map[string][32]byte), owners: make(map[[32]byte]string)}
+	}}}
 	// The login page offers the optional plan field; Parse is the full
 	// ParseAuth pipeline below, including the duplicate-key guard, so a
-	// submitted key faces the same checks as an uploaded auth file.
-	login, err := kit.NewAPIKeyLogin(kit.APIKeyLoginConfig{Provider: provider, Parse: p.ParseAuth, Fields: []kit.APIKeyLoginField{
+	// submitted key faces the same checks as an uploaded auth file. Plan is
+	// neither secret nor part of the credential identity (identity is the
+	// API key alone), so the field needs neither kit's Secret hidden input
+	// nor a FilenameFields entry.
+	login, err := kit.NewAPIKeyLogin(kit.APIKeyLoginConfig{Provider: provider, Parse: p.ParseAuth, SessionTTL: loginTTL, Fields: []kit.APIKeyLoginField{
 		{Name: "plan", Label: "Plan", Description: "Synthetic plan: go, standard or big. Leave blank to skip.", Required: false},
 	}})
 	if err != nil {
@@ -52,15 +63,8 @@ func (p *authProvider) ParseAuth(ctx context.Context, r pluginapi.AuthParseReque
 		return pluginapi.AuthParseResponse{}, err
 	}
 	digest := sha256.Sum256([]byte(key))
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if file, ok := p.owners[digest]; ok && file != r.FileName {
-		return pluginapi.AuthParseResponse{}, &pluginabi.Error{Code: "duplicate_auth", Message: "the same API key is already configured in another auth file", HTTPStatus: 400}
+	if err := p.guard.Claim(ctx, r.FileName, digest); err != nil {
+		return pluginapi.AuthParseResponse{}, err
 	}
-	if old, ok := p.files[r.FileName]; ok && old != digest {
-		delete(p.owners, old)
-	}
-	p.files[r.FileName] = digest
-	p.owners[digest] = r.FileName
 	return out, nil
 }

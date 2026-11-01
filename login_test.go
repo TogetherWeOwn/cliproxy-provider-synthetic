@@ -6,7 +6,9 @@ import (
 	"html"
 	"strings"
 	"testing"
+	"time"
 
+	kit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -52,7 +54,7 @@ func TestAPIKeyLoginWired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(start.URL, "http://127.0.0.1:19000"+testResourceBase+"/login?state=") {
+	if !strings.HasPrefix(start.URL, testResourceBase+"/login?state=") {
 		t.Fatalf("unexpected login URL %q", start.URL)
 	}
 	poll, err := p.PollLogin(ctx, pluginapi.AuthLoginPollRequest{State: start.State})
@@ -122,5 +124,61 @@ func TestAPIKeyLoginRejectsBadPlan(t *testing.T) {
 	}
 	if strings.Contains(string(submit.Body), "example-key") {
 		t.Fatalf("rejection echoed the key: %s", submit.Body)
+	}
+}
+
+// TestLoginAbandonedReleasesOwnership mirrors the kit's
+// TestLoginAbandonedSubmitReleasesOwnership against this provider's own
+// ParseAuth pipeline: a key submitted through login but never polled holds
+// its ownership only until the login session expires. After that, parsing
+// the same key under a different filename succeeds (and commits ownership)
+// instead of failing with duplicate_auth until plugin restart.
+func TestLoginAbandonedReleasesOwnership(t *testing.T) {
+	ctx := context.Background()
+	p, err := newAuthProviderWithLoginTTL(500 * time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Login.RegisterManagement(ctx, pluginapi.ManagementRegistrationRequest{
+		BasePath: "/v0/management", ResourceBasePath: testResourceBase}); err != nil {
+		t.Fatal(err)
+	}
+	start, err := p.StartLogin(ctx, pluginapi.AuthLoginStartRequest{Provider: "synthetic",
+		BaseURL: testBaseURL, Host: pluginapi.HostConfigSummary{AuthDir: "/tmp/synthetic-auth"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	submit, err := p.Login.HandleManagement(ctx, pluginapi.ManagementRequest{Method: "POST",
+		Path: testSubmitPath,
+		Body: []byte(`{"state":"` + start.State + `","api_key":"abandoned-key"}`)})
+	if err != nil || submit.StatusCode != 200 {
+		t.Fatalf("submit %+v %v", submit, err)
+	}
+	// The login is abandoned here: it is never polled.
+	upload := func(file string) error {
+		_, err := p.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: file,
+			RawJSON: []byte(`{"type":"synthetic","api_key":"abandoned-key"}`)})
+		return err
+	}
+	// While the login is still in flight its reservation blocks other files.
+	if err := upload("upload.json"); err == nil || kit.MapError(err).Code != "duplicate_auth" {
+		t.Fatalf("upload during login = %v, want duplicate_auth", err)
+	}
+	// After the abandoned session's TTL lapses the same upload owns the key.
+	// A rejected claim records nothing, so retrying until the reservation
+	// lapses is safe; the deadline keeps a stuck guard from hanging the test.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := upload("upload.json"); err == nil {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("upload after abandoned session expired: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The successful upload committed ownership, so a third filename is a
+	// duplicate again.
+	if err := upload("third.json"); err == nil || kit.MapError(err).Code != "duplicate_auth" {
+		t.Fatalf("third file after commit = %v, want duplicate_auth", err)
 	}
 }
