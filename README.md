@@ -45,7 +45,11 @@ ownership; do not copy an existing key into another file during a rename.
 
 Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`, `label`
 and `disabled`. The optional auth `prefix` does not replace the fixed model
-namespace. Under per-credential pinning the payload model may still carry the
+namespace. It is normalized exactly like the host filestore: surrounding
+whitespace and `/` are trimmed, and a `prefix` still containing `/` is rejected
+with `invalid_auth` — the plugin path pins whatever parse returns verbatim, so
+a slashed prefix could otherwise merge two pinning namespaces while looking
+unpinned. Under per-credential pinning the payload model may still carry the
 host prefix (`<acct>/synthetic/<id>`); one leading `<prefix>/` segment is
 stripped before the provider-prefix check, so pinned and unpinned callers take
 the same path. Login/poll operations report API-key-only; refresh preserves storage

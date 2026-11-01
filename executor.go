@@ -24,9 +24,11 @@ func newExecutor(q *quotaProvider) executor {
 }
 func (e executor) forAuth(id string, storage []byte, meta map[string]any) kit.Passthrough {
 	p := e.Passthrough
-	hint := e.quota.latest(id, credentialDigest(storage, meta))
+	digest := credentialDigest(storage, meta)
 	p.ClassifyError = func(resp pluginapi.HTTPResponse) error {
-		return classifyWithQuota(resp, time.Now(), hint)
+		// Evaluated lazily: a header observation that lands during a long
+		// stream is still fresh evidence when the 429 classifies.
+		return classifyWithQuota(resp, time.Now(), e.quota.latest(id, digest))
 	}
 	return p
 }
@@ -36,11 +38,13 @@ func (e executor) forAuth(id string, storage []byte, meta map[string]any) kit.Pa
 // payload model to the stripped execution model for registered plugin models,
 // but raw HTTP execution and unregistered models can still arrive pinned, and
 // without this the pinned shape "<acct>/synthetic/<id>" fails the provider
-// prefix check below. Prefixes containing "/" are never stripped: the host
-// normalizes those to unpinned, so nothing was prepended.
+// prefix check below. The host pins the auth prefix verbatim
+// ("<prefix>/<id>"), so any non-empty prefix strips verbatim. Slashed
+// prefixes can no longer come from ParseAuth (rejected with invalid_auth),
+// but if one ever reaches metadata it still pinned verbatim.
 func stripHostPrefix(model string, meta map[string]any) string {
 	prefix, _ := meta["prefix"].(string)
-	if prefix = strings.TrimSpace(prefix); prefix == "" || strings.Contains(prefix, "/") {
+	if prefix = strings.TrimSpace(prefix); prefix == "" {
 		return model
 	}
 	return strings.TrimPrefix(model, prefix+"/")

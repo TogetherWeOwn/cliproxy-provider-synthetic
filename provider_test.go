@@ -112,6 +112,7 @@ func TestBuildRequestStripsPinnedHostPrefix(t *testing.T) {
 		{"pinned infinite forces stream", "acct/synthetic/infinite:small:vision", pinned, "infinite:small:vision", true},
 		{"host already stripped", "synthetic/syn:small:text", pinned, "syn:small:text", false},
 		{"no metadata", "synthetic/syn:small:text", nil, "syn:small:text", false},
+		{"slashed prefix strips verbatim like the host pins", "a/b/synthetic/syn:small:text", map[string]any{"prefix": "a/b"}, "syn:small:text", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload, _ := json.Marshal(map[string]any{"model": tc.model, "messages": []any{}})
@@ -131,7 +132,6 @@ func TestBuildRequestStripsPinnedHostPrefix(t *testing.T) {
 		meta  map[string]any
 	}{
 		{"wrong prefix is not a provider model", "other/synthetic/syn:small:text", pinned},
-		{"slash prefix is unpinned and never stripped", "a/b/synthetic/syn:small:text", map[string]any{"prefix": "a/b"}},
 		{"pinned bare id has no provider prefix", "acct/syn:small:text", pinned},
 		{"pinned provider prefix alone names no model", "acct/synthetic/", pinned},
 	} {
@@ -165,16 +165,27 @@ func TestAuthDuplicatePrefixRejectedAcrossFiles(t *testing.T) {
 	if err := parse("second.json", `{"type":"synthetic","api_key":"example-key","prefix":"acct"}`); err == nil {
 		t.Fatal("duplicate key accepted under the same prefix")
 	}
-	// Reparsing the owning file is a no-op, and slash-bearing prefixes are
-	// unpinned: any number of files may share them.
+	// Reparsing the owning file is a no-op.
 	if err := parse("first.json", `{"type":"synthetic","api_key":"example-key","prefix":"acct"}`); err != nil {
 		t.Fatal(err)
 	}
-	if err := parse("a.json", `{"type":"synthetic","api_key":"key-a","prefix":"has/slash"}`); err != nil {
+	// Slashed prefixes are rejected at parse: the plugin path would pin them
+	// verbatim, so they must never silently share the unpinned namespace.
+	for _, raw := range []string{
+		`{"type":"synthetic","api_key":"key-a","prefix":"has/slash"}`,
+		`{"type":"synthetic","api_key":"key-b","prefix":"has/slash"}`,
+	} {
+		if err := parse("slash.json", raw); err == nil {
+			t.Fatalf("accepted %s", raw)
+		}
+	}
+	// Leading/trailing slashes normalize like the filestore: "trim/" claims
+	// "trim", and a second credential under "trim" collides loudly.
+	if err := parse("trail.json", `{"type":"synthetic","api_key":"key-trail","prefix":"trim/"}`); err != nil {
 		t.Fatal(err)
 	}
-	if err := parse("b.json", `{"type":"synthetic","api_key":"key-b","prefix":"has/slash"}`); err != nil {
-		t.Fatal(err)
+	if err := parse("squat.json", `{"type":"synthetic","api_key":"key-squat","prefix":"trim"}`); err == nil {
+		t.Fatal("normalized prefix collision accepted")
 	}
 }
 

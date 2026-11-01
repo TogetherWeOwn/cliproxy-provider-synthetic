@@ -368,6 +368,23 @@ func TestRealHostLoader(t *testing.T) {
 			t.Fatalf("pinned execute %s %v", resp.Payload, err)
 		}
 	})
+	t.Run("prefix normalization matches the filestore end to end", func(t *testing.T) {
+		// A trailing slash normalizes at parse: the plugin reports "trail"
+		// and the real host round-trips it, exactly as for a filestore auth.
+		trail, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "trail.json", RawJSON: []byte(`{"type":"synthetic","api_key":"trail-key","prefix":"trail/"}`)})
+		if err != nil || !handled || trail == nil {
+			t.Fatalf("trailing-slash auth %v %v", handled, err)
+		}
+		if trail.Prefix != "trail" {
+			t.Fatalf("trailing slash not normalized end to end: %+v", trail)
+		}
+		// An inner slash would pin verbatim on the plugin path and merge
+		// pinning namespaces, so the plugin rejects it instead of silently
+		// treating it as unpinned.
+		if _, _, err = host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "slash.json", RawJSON: []byte(`{"type":"synthetic","api_key":"slash-key","prefix":"a/b"}`)}); err == nil {
+			t.Fatal("slash-bearing prefix accepted at parse")
+		}
+	})
 }
 
 func TestRegistryUsesNativeStoreSchema(t *testing.T) {
