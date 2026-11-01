@@ -124,14 +124,17 @@ func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
 	return out
 }
 
-// normalizeQuotas emits one group per shape present, so a payload reporting
-// weekly credits alongside legacy request packs no longer hides the latter.
-// A single-shape input renders exactly as normalizeQuota renders it, and the
-// weekly summary comes from the first weekly shape.
+// normalizeQuotas collects every shape into a single Synthetic group with one
+// bucket per shape, so a payload reporting weekly credits alongside legacy
+// request packs no longer hides the latter — and the panel renders one group
+// header instead of a repeated header per shape. A single-shape input renders
+// exactly as normalizeQuota renders it, and the weekly summary comes from
+// the first weekly shape.
 // planWeeklyLimit and weeklyTokenLimit are the same bucket in current and
 // legacy form: when both are present only the current plan shape is rendered.
 func normalizeQuotas(readings []quotaReading) pluginapi.QuotaFetchResponse {
-	out := pluginapi.QuotaFetchResponse{}
+	var buckets []pluginapi.QuotaBucket
+	var summary []pluginapi.QuotaMetric
 	hasPlanWeekly := false
 	for _, reading := range readings {
 		if reading.Shape == "planWeeklyLimit" && reading.PercentRemaining != nil {
@@ -144,10 +147,16 @@ func normalizeQuotas(readings []quotaReading) pluginapi.QuotaFetchResponse {
 			continue
 		}
 		one := normalizeQuota(reading)
-		out.Groups = append(out.Groups, one.Groups...)
-		if len(out.Summary) == 0 && len(one.Summary) > 0 {
-			out.Summary = one.Summary
+		for _, g := range one.Groups {
+			buckets = append(buckets, g.Buckets...)
 		}
+		if len(summary) == 0 && len(one.Summary) > 0 {
+			summary = one.Summary
+		}
+	}
+	out := pluginapi.QuotaFetchResponse{Summary: summary}
+	if len(buckets) > 0 {
+		out.Groups = []pluginapi.QuotaGroup{{DisplayName: "Synthetic", Buckets: buckets}}
 	}
 	return out
 }

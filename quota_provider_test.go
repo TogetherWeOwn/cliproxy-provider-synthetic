@@ -79,15 +79,21 @@ func TestMultiShapeQuotaEmitsOneBucketPerShape(t *testing.T) {
 		t.Fatalf("expected 3 shapes, got %+v", readings)
 	}
 	got := normalizeQuotas(readings)
-	if len(got.Groups) != 3 {
-		t.Fatalf("expected one group per shape: %+v", got)
+	if len(got.Groups) != 1 {
+		t.Fatalf("expected one group for all shapes: %+v", got)
+	}
+	if got.Groups[0].DisplayName != "Synthetic" {
+		t.Fatalf("group %+v does not use the plugin name", got.Groups[0])
+	}
+	if len(got.Groups[0].Buckets) != 3 {
+		t.Fatalf("expected one bucket per shape, got %+v", got)
 	}
 	windows := map[string]float64{}
-	for _, g := range got.Groups {
-		if len(g.Buckets) != 1 {
-			t.Fatalf("group %+v has %d buckets", g, len(g.Buckets))
+	for _, b := range got.Groups[0].Buckets {
+		windows[b.Window] = b.RemainingFraction
+		if b.Description != "" {
+			t.Fatalf("bucket %+v carries description text", b)
 		}
-		windows[g.Buckets[0].Window] = g.Buckets[0].RemainingFraction
 	}
 	if windows["Weekly credits"] != 0.25 || windows[providerkit.CardWindowFiveHour] != 0.5 || windows["Subscription"] != 0.6 {
 		t.Fatalf("wrong per-shape fractions: %+v", got)
@@ -95,16 +101,6 @@ func TestMultiShapeQuotaEmitsOneBucketPerShape(t *testing.T) {
 	// None of these shapes regenerates, so no refill chip is emitted.
 	if len(got.Summary) != 0 {
 		t.Fatalf("unexpected summary: %+v", got)
-	}
-	for _, g := range got.Groups {
-		if g.DisplayName != "Synthetic" {
-			t.Fatalf("group %+v does not use the plugin name", g)
-		}
-		for _, b := range g.Buckets {
-			if b.Description != "" {
-				t.Fatalf("bucket %+v carries description text", b)
-			}
-		}
 	}
 	if violations := providerkit.CheckCard(got); len(violations) != 0 {
 		t.Fatalf("CheckCard violations: %v", violations)
