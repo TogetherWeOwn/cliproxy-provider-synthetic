@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	providerkit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -49,10 +50,14 @@ func TestLegacyQuotaDoesNotClaimWeeklyCredits(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := normalizeQuota(r)
-	for _, metric := range got.Summary {
-		if metric.Key == "weekly_credits_remaining_percent" {
-			t.Fatal("legacy five-hour quota mislabeled as weekly credits")
-		}
+	if len(got.Groups) != 1 || got.Groups[0].Buckets[0].Window == "Weekly credits" {
+		t.Fatalf("legacy five-hour quota mislabeled as weekly credits: %+v", got)
+	}
+	if len(got.Summary) != 0 {
+		t.Fatalf("legacy quota must not emit a weekly summary: %+v", got)
+	}
+	if violations := providerkit.CheckCard(got); len(violations) != 0 {
+		t.Fatalf("CheckCard violations: %v", violations)
 	}
 }
 
@@ -84,18 +89,53 @@ func TestMultiShapeQuotaEmitsOneBucketPerShape(t *testing.T) {
 		}
 		windows[g.Buckets[0].Window] = g.Buckets[0].RemainingFraction
 	}
-	if windows["weekly"] != 0.25 || windows["5h"] != 0.5 || windows["subscription"] != 0.6 {
+	if windows["Weekly credits"] != 0.25 || windows[providerkit.CardWindowFiveHour] != 0.5 || windows["Subscription"] != 0.6 {
 		t.Fatalf("wrong per-shape fractions: %+v", got)
 	}
-	if len(got.Summary) != 1 || got.Summary[0].Key != "weekly_credits_remaining_percent" {
-		t.Fatalf("weekly summary missing: %+v", got)
+	// None of these shapes regenerates, so no refill chip is emitted.
+	if len(got.Summary) != 0 {
+		t.Fatalf("unexpected summary: %+v", got)
+	}
+	for _, g := range got.Groups {
+		if g.DisplayName != "Synthetic" {
+			t.Fatalf("group %+v does not use the plugin name", g)
+		}
+		for _, b := range g.Buckets {
+			if b.Description != "" {
+				t.Fatalf("bucket %+v carries description text", b)
+			}
+		}
+	}
+	if violations := providerkit.CheckCard(got); len(violations) != 0 {
+		t.Fatalf("CheckCard violations: %v", violations)
 	}
 	// A single-shape input renders exactly as before.
 	single, err := parseQuota([]byte(`{"rollingFiveHourLimit":{"remaining":1,"max":2}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if multi := normalizeQuotas([]quotaReading{single}); len(multi.Groups) != 1 || multi.Groups[0].DisplayName != "Legacy request limit" {
+	if multi := normalizeQuotas([]quotaReading{single}); len(multi.Groups) != 1 || multi.Groups[0].DisplayName != "Synthetic" {
 		t.Fatalf("single-shape output changed: %+v", multi)
+	}
+}
+
+// A non-zero regeneration percent appears as a refill chip; a zero percent
+// and a missing percent emit no summary.
+func TestNextRefillChipOnlyWhenNonZero(t *testing.T) {
+	regen := func(pct *float64) pluginapi.QuotaFetchResponse {
+		return normalizeQuota(quotaReading{Shape: "planWeeklyLimit", PercentRemaining: floatPtr(25), NextRegenPercent: pct})
+	}
+	got := regen(floatPtr(2))
+	if len(got.Summary) != 1 || got.Summary[0].Key != "next_refill_percent" || got.Summary[0].Value != 2 {
+		t.Fatalf("refill chip missing: %+v", got)
+	}
+	if violations := providerkit.CheckCard(got); len(violations) != 0 {
+		t.Fatalf("CheckCard violations: %v", violations)
+	}
+	if got := regen(floatPtr(0)); len(got.Summary) != 0 {
+		t.Fatalf("zero refill must not emit a chip: %+v", got)
+	}
+	if got := regen(nil); len(got.Summary) != 0 {
+		t.Fatalf("missing refill must not emit a chip: %+v", got)
 	}
 }

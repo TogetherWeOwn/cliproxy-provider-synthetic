@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -107,23 +106,20 @@ func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
 		return pluginapi.QuotaFetchResponse{}
 	}
 	percent := clamp(*reading.PercentRemaining, 0, 100)
-	window, name, description := "weekly", "Weekly credits", "Next regeneration, not a full reset"
+	window := "Weekly credits"
 	switch reading.Shape {
 	case "rollingFiveHourLimit":
-		window, name, description = "5h", "Legacy request limit", "Next regeneration, not a full reset"
+		window = providerkit.CardWindowFiveHour
 	case "subscription":
-		window, name, description = "subscription", "Legacy subscription", "Subscription renewal"
+		window = "Subscription"
 	}
-	bucket := pluginapi.QuotaBucket{Window: window, RemainingFraction: percent / 100, Description: description}
+	bucket := pluginapi.QuotaBucket{Window: window, RemainingFraction: percent / 100}
 	if !reading.NextRegenAt.IsZero() {
 		bucket.ResetTime = reading.NextRegenAt.Format(time.RFC3339Nano)
 	}
-	if reading.NextRegenPercent != nil {
-		bucket.Description += fmt.Sprintf(" (next increment %.2g%%)", *reading.NextRegenPercent)
-	}
-	out := pluginapi.QuotaFetchResponse{Groups: []pluginapi.QuotaGroup{{DisplayName: name, Buckets: []pluginapi.QuotaBucket{bucket}}}}
-	if window == "weekly" {
-		out.Summary = []pluginapi.QuotaMetric{{Key: "weekly_credits_remaining_percent", Label: "Remaining", Value: percent, Unit: "%", Format: "number"}}
+	out := pluginapi.QuotaFetchResponse{Groups: []pluginapi.QuotaGroup{{DisplayName: "Synthetic", Buckets: []pluginapi.QuotaBucket{bucket}}}}
+	if reading.NextRegenPercent != nil && *reading.NextRegenPercent != 0 {
+		out.Summary = []pluginapi.QuotaMetric{{Key: "next_refill_percent", Label: "Next refill", Value: *reading.NextRegenPercent, Unit: "%", Format: "number"}}
 	}
 	return out
 }
