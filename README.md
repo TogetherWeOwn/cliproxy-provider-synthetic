@@ -3,7 +3,7 @@
 First-class Synthetic API-key auth files, namespaced model discovery, OpenAI
 chat execution and read-only quota cards. Built on
 [`cliproxy-provider-kit`](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
-at `21069bf` (v8.0.49 plugin ABI: answers RPC schema 10, refuses hosts older than schema 10)
+at `88850ce` (v8.0.49 plugin ABI: answers RPC schema 10, refuses hosts older than schema 10)
 and tested with the **real CLIProxyAPI v8.0.49 C-ABI loader** (ABI 1, RPC schema 10).
 Requires CLIProxyAPI v8.0.49 or newer.
 
@@ -42,8 +42,8 @@ files requires a plugin lifecycle restart to clear its in-memory duplicate-file
 ownership; do not copy an existing key into another file during a rename.
 
 Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`, `label`
-and `disabled`. The optional auth `prefix` does not replace the fixed model
-namespace. Login/poll operations report API-key-only; refresh preserves storage
+and `disabled`. Fixed model namespace `synthetic/`; auth `prefix` does not
+replace it. Login/poll operations report API-key-only; refresh preserves storage
 and performs no upstream request. API keys cannot be refreshed by this plugin.
 
 ## Models and execution
@@ -73,9 +73,13 @@ or an upstream billable operation.
 
 `infinite:*` always sends upstream `stream:true`. For a non-streaming client, SSE
 is aggregated into one `chat.completion`, including indexed choices, fragmented
-tool calls, reasoning and summed reported usage. Truncated/malformed streams
-fail rather than invent a successful result. Aggregation is bounded to 32 MiB
-and 2 MiB per SSE line. It does not change which account/model the host selects.
+tool calls, reasoning and summed reported usage. Malformed streams, and streams
+that end before every choice carries a finish reason, fail rather than invent
+a successful result; a clean channel close after complete choices is the
+terminal marker (the kit drops the upstream `[DONE]`), so a stream cut after
+its final choice succeeds with complete content. Aggregation is bounded to 32 MiB
+total; each upstream event is additionally bounded by the kit's 8 MiB SSE event
+limit. It does not change which account/model the host selects.
 
 ## Quota and failure classification
 

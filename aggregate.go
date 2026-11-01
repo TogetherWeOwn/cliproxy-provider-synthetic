@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -16,41 +15,6 @@ const maxAggregateBytes = 32 << 20
 
 func invalidSSE() error {
 	return &pluginabi.Error{Code: "invalid_stream", Message: "Synthetic returned an invalid or incomplete completion stream", HTTPStatus: 502, Retryable: true}
-}
-
-// Read across arbitrary host chunk boundaries; no goroutine or unbounded pipe is
-// needed to adapt the host's channel to the SSE decoder.
-type chunkReader struct {
-	ctx     context.Context
-	chunks  <-chan pluginapi.ExecutorStreamChunk
-	pending []byte
-	err     error
-	total   int
-}
-
-func (r *chunkReader) Read(p []byte) (int, error) {
-	for len(r.pending) == 0 {
-		if r.err != nil {
-			return 0, r.err
-		}
-		select {
-		case <-r.ctx.Done():
-			return 0, r.ctx.Err()
-		case c, ok := <-r.chunks:
-			if !ok {
-				return 0, io.EOF
-			}
-			r.total += len(c.Payload)
-			if r.total > maxAggregateBytes {
-				return 0, invalidSSE()
-			}
-			r.pending = c.Payload
-			r.err = c.Err
-		}
-	}
-	n := copy(p, r.pending)
-	r.pending = r.pending[n:]
-	return n, nil
 }
 
 type streamChoice struct {
@@ -123,11 +87,11 @@ func sumUsage(dst, src map[string]any) {
 }
 
 // aggregateSSE constructs the OpenAI chat.completion shape, including indexed
-// choices, fragmented tool arguments, reasoning and reported token usage. A
-// missing terminal marker is an error, not a fabricated successful completion.
+// choices, fragmented tool arguments, reasoning and reported token usage. The
+// stream ending without events is an error, not a fabricated successful
+// completion; a clean channel close is the terminal marker (the kit drops the
+// SSE [DONE] marker before these chunks reach the plugin).
 func aggregateSSE(ctx context.Context, chunks <-chan pluginapi.ExecutorStreamChunk) ([]byte, error) {
-	scanner := bufio.NewScanner(&chunkReader{ctx: ctx, chunks: chunks})
-	scanner.Buffer(make([]byte, 4096), 2<<20)
 	choices := make(map[int]*streamChoice)
 	usage := make(map[string]any)
 	out := map[string]any{"object": "chat.completion"}
@@ -241,28 +205,47 @@ func aggregateSSE(ctx context.Context, chunks <-chan pluginapi.ExecutorStreamChu
 		}
 		return nil
 	}
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
+	// Input chunks come from kit Passthrough.ExecuteStream, already re-framed
+	// to one event per chunk (bare JSON, or "data:"-framed when the request
+	// carried no chat route): there is no SSE text to scan, no comment to
+	// skip and no [DONE] marker. Channel close is the terminal marker.
+	drained := false
+	total := 0
+	for !drained {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case c, ok := <-chunks:
+			if !ok {
+				drained = true
+				done = true
+				continue
+			}
+			if c.Err != nil {
+				return nil, invalidSSE()
+			}
+			total += len(c.Payload)
+			if total > maxAggregateBytes {
+				return nil, invalidSSE()
+			}
+			event := strings.TrimSpace(string(c.Payload))
+			if rest, ok := strings.CutPrefix(event, "data:"); ok {
+				event = strings.TrimPrefix(rest, " ")
+			}
+			if event == "" || strings.HasPrefix(event, ":") {
+				continue
+			}
+			data = []string{event}
 			if err := consume(); err != nil {
 				return nil, err
 			}
 			if done {
-				break
+				drained = true
 			}
-			continue
-		}
-		if strings.HasPrefix(line, "data:") {
-			value := strings.TrimPrefix(line, "data:")
-			value = strings.TrimPrefix(value, " ")
-			data = append(data, value)
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if scanner.Err() != nil {
-		return nil, invalidSSE()
 	}
 	if !done {
 		if err := consume(); err != nil {
