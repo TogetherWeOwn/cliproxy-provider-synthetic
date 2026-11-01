@@ -132,9 +132,21 @@ func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
 // weekly credits alongside legacy request packs no longer hides the latter.
 // A single-shape input renders exactly as normalizeQuota renders it, and the
 // weekly summary comes from the first weekly shape.
+// planWeeklyLimit and weeklyTokenLimit are the same bucket in current and
+// legacy form: when both are present only the current plan shape is rendered.
 func normalizeQuotas(readings []quotaReading) pluginapi.QuotaFetchResponse {
 	out := pluginapi.QuotaFetchResponse{}
+	hasPlanWeekly := false
 	for _, reading := range readings {
+		if reading.Shape == "planWeeklyLimit" && reading.PercentRemaining != nil {
+			hasPlanWeekly = true
+			break
+		}
+	}
+	for _, reading := range readings {
+		if hasPlanWeekly && reading.Shape == "weeklyTokenLimit" {
+			continue
+		}
 		one := normalizeQuota(reading)
 		out.Groups = append(out.Groups, one.Groups...)
 		if len(out.Summary) == 0 && len(one.Summary) > 0 {

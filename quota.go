@@ -74,20 +74,24 @@ type quotaWire struct {
 var errNoQuotaShape = errors.New("quota payload has no recognized limit")
 
 // parseQuotas returns one reading per quota shape present in the payload:
-// weekly (current and legacy token plans), rolling-5h (legacy request
+// weekly (current plan preferred), rolling-5h (legacy request
 // packs), and subscription (the documented example). Shape order follows the
 // wire struct, so parseQuota's historical first-match result is readings[0].
+// planWeeklyLimit and weeklyTokenLimit are the same weekly-credits bucket in
+// its current and legacy form, so a payload reporting both keeps only the
+// current plan shape instead of rendering two identical "Weekly credits" cards.
 func parseQuotas(raw []byte) ([]quotaReading, error) {
 	var wire quotaWire
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return nil, fmt.Errorf("decode quota payload")
 	}
 	var readings []quotaReading
-	if wire.PlanWeeklyLimit != nil && wire.PlanWeeklyLimit.PercentRemaining != nil {
+	hasPlanWeekly := wire.PlanWeeklyLimit != nil && wire.PlanWeeklyLimit.PercentRemaining != nil
+	if hasPlanWeekly {
 		w := wire.PlanWeeklyLimit
 		readings = append(readings, quotaReading{PercentRemaining: floatPtr(*w.PercentRemaining), NextRegenAt: parseTime(w.NextRegenAt), NextRegenPercent: copyFloat(w.NextRegenPercent), Shape: "planWeeklyLimit"})
 	}
-	if wire.WeeklyTokenLimit != nil && wire.WeeklyTokenLimit.PercentRemaining != nil {
+	if !hasPlanWeekly && wire.WeeklyTokenLimit != nil && wire.WeeklyTokenLimit.PercentRemaining != nil {
 		w := wire.WeeklyTokenLimit
 		readings = append(readings, quotaReading{PercentRemaining: floatPtr(*w.PercentRemaining), NextRegenAt: parseTime(w.NextRegenAt), Shape: "weeklyTokenLimit"})
 	}
