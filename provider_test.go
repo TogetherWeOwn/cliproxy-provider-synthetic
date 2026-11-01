@@ -99,6 +99,85 @@ func TestStaticCatalogOnlyPrefixedChatModels(t *testing.T) {
 	}
 }
 
+func TestBuildRequestStripsPinnedHostPrefix(t *testing.T) {
+	pinned := map[string]any{"prefix": "acct"}
+	for _, tc := range []struct {
+		name       string
+		model      string
+		meta       map[string]any
+		wantUp     string
+		wantStream bool
+	}{
+		{"pinned chat", "acct/synthetic/syn:small:text", pinned, "syn:small:text", false},
+		{"pinned infinite forces stream", "acct/synthetic/infinite:small:vision", pinned, "infinite:small:vision", true},
+		{"host already stripped", "synthetic/syn:small:text", pinned, "syn:small:text", false},
+		{"no metadata", "synthetic/syn:small:text", nil, "syn:small:text", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, _ := json.Marshal(map[string]any{"model": tc.model, "messages": []any{}})
+			got, err := buildRequest(context.Background(), pluginapi.ExecutorRequest{Payload: payload, StorageJSON: []byte(`{"api_key":"example-key"}`), AuthMetadata: tc.meta})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body map[string]any
+			if json.Unmarshal(got.Body, &body) != nil || body["model"] != tc.wantUp || (body["stream"] == true) != tc.wantStream {
+				t.Fatalf("pinned model not stripped: %s", got.Body)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name  string
+		model string
+		meta  map[string]any
+	}{
+		{"wrong prefix is not a provider model", "other/synthetic/syn:small:text", pinned},
+		{"slash prefix is unpinned and never stripped", "a/b/synthetic/syn:small:text", map[string]any{"prefix": "a/b"}},
+		{"pinned bare id has no provider prefix", "acct/syn:small:text", pinned},
+		{"pinned provider prefix alone names no model", "acct/synthetic/", pinned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, _ := json.Marshal(map[string]any{"model": tc.model})
+			if _, err := buildRequest(context.Background(), pluginapi.ExecutorRequest{Payload: payload, StorageJSON: []byte(`{"api_key":"example-key"}`), AuthMetadata: tc.meta}); err == nil {
+				t.Fatalf("accepted %q", tc.model)
+			}
+		})
+	}
+}
+
+func TestAuthDuplicatePrefixRejectedAcrossFiles(t *testing.T) {
+	p := newAuthProvider()
+	ctx := context.Background()
+	parse := func(file, raw string) error {
+		_, err := p.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: file, RawJSON: []byte(raw)})
+		return err
+	}
+	if err := parse("first.json", `{"type":"synthetic","api_key":"example-key","prefix":"acct"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := parse("second.json", `{"type":"synthetic","api_key":"second-key","prefix":"acct"}`); err == nil {
+		t.Fatal("second credential accepted under a claimed prefix")
+	}
+	// The rejected claim leaves no residue: the first file still owns it.
+	if err := parse("third.json", `{"type":"synthetic","api_key":"third-key","prefix":"acct"}`); err == nil {
+		t.Fatal("rejected claim evicted the owner")
+	}
+	// The same key under a second file is still a duplicate credential.
+	if err := parse("second.json", `{"type":"synthetic","api_key":"example-key","prefix":"acct"}`); err == nil {
+		t.Fatal("duplicate key accepted under the same prefix")
+	}
+	// Reparsing the owning file is a no-op, and slash-bearing prefixes are
+	// unpinned: any number of files may share them.
+	if err := parse("first.json", `{"type":"synthetic","api_key":"example-key","prefix":"acct"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := parse("a.json", `{"type":"synthetic","api_key":"key-a","prefix":"has/slash"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := parse("b.json", `{"type":"synthetic","api_key":"key-b","prefix":"has/slash"}`); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPrepareHTTPDoesNotForwardUntrustedURLOrHeaders(t *testing.T) {
 	req, err := prepareHTTP(context.Background(), pluginapi.ExecutorHTTPRequest{Method: "DELETE", URL: "https://example.invalid/private", Headers: http.Header{"Authorization": {"Bearer attacker"}}, Body: []byte(`{"model":"synthetic/syn:small:text"}`), StorageJSON: []byte(`{"api_key":"example-key"}`)})
 	if err != nil || req.URL != "https://api.synthetic.new/openai/v1/chat/completions" || req.Method != "POST" || req.Headers.Get("Authorization") != "Bearer example-key" {

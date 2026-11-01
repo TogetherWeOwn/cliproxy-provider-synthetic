@@ -22,25 +22,41 @@ type executor struct {
 func newExecutor(q *quotaProvider) executor {
 	return executor{Passthrough: kit.Passthrough{Provider: provider, BuildRequest: buildRequest, PrepareHTTP: prepareHTTP, ClassifyError: classifyResponse}, quota: q}
 }
-func (e executor) forAuth(id string) kit.Passthrough {
+func (e executor) forAuth(id string, storage []byte, meta map[string]any) kit.Passthrough {
 	p := e.Passthrough
+	hint := e.quota.latest(id, credentialDigest(storage, meta))
 	p.ClassifyError = func(resp pluginapi.HTTPResponse) error {
-		return classifyWithQuota(resp, time.Now(), e.quota.latest(id))
+		return classifyWithQuota(resp, time.Now(), hint)
 	}
 	return p
+}
+
+// stripHostPrefix removes one leading "<prefix>/" segment from a payload model
+// when the host pinned this credential under a prefix. The host rewrites the
+// payload model to the stripped execution model for registered plugin models,
+// but raw HTTP execution and unregistered models can still arrive pinned, and
+// without this the pinned shape "<acct>/synthetic/<id>" fails the provider
+// prefix check below. Prefixes containing "/" are never stripped: the host
+// normalizes those to unpinned, so nothing was prepended.
+func stripHostPrefix(model string, meta map[string]any) string {
+	prefix, _ := meta["prefix"].(string)
+	if prefix = strings.TrimSpace(prefix); prefix == "" || strings.Contains(prefix, "/") {
+		return model
+	}
+	return strings.TrimPrefix(model, prefix+"/")
 }
 
 func (e executor) Execute(ctx context.Context, r pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
 	// Execute is non-streaming regardless of an inconsistent payload stream flag.
 	var input struct{ Model string }
 	_ = json.Unmarshal(r.Payload, &input)
-	if !strings.HasPrefix(input.Model, modelPrefix+"infinite:") {
-		return e.forAuth(r.AuthID).Execute(ctx, r)
+	if !strings.HasPrefix(stripHostPrefix(input.Model, r.AuthMetadata), modelPrefix+"infinite:") {
+		return e.forAuth(r.AuthID, r.StorageJSON, r.AuthMetadata).Execute(ctx, r)
 	}
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	r.Stream = true
-	stream, err := e.forAuth(r.AuthID).ExecuteStream(streamCtx, r)
+	stream, err := e.forAuth(r.AuthID, r.StorageJSON, r.AuthMetadata).ExecuteStream(streamCtx, r)
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
@@ -61,7 +77,7 @@ func (e executor) Execute(ctx context.Context, r pluginapi.ExecutorRequest) (plu
 
 func (e executor) ExecuteStream(ctx context.Context, r pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
 	r.Stream = true
-	return e.forAuth(r.AuthID).ExecuteStream(ctx, r)
+	return e.forAuth(r.AuthID, r.StorageJSON, r.AuthMetadata).ExecuteStream(ctx, r)
 }
 
 func (e executor) HttpRequest(ctx context.Context, r pluginapi.ExecutorHTTPRequest) (pluginapi.ExecutorHTTPResponse, error) {
@@ -70,14 +86,14 @@ func (e executor) HttpRequest(ctx context.Context, r pluginapi.ExecutorHTTPReque
 		Stream bool
 	}
 	_ = json.Unmarshal(r.Body, &mode)
-	if strings.HasPrefix(mode.Model, modelPrefix+"infinite:") && !mode.Stream {
+	if strings.HasPrefix(stripHostPrefix(mode.Model, r.Metadata), modelPrefix+"infinite:") && !mode.Stream {
 		out, err := e.Execute(ctx, pluginapi.ExecutorRequest{AuthID: r.AuthID, Payload: r.Body, StorageJSON: r.StorageJSON, AuthMetadata: r.Metadata, HTTPClient: r.HTTPClient})
 		if err != nil {
 			return pluginapi.ExecutorHTTPResponse{}, err
 		}
 		return pluginapi.ExecutorHTTPResponse{StatusCode: http.StatusOK, Headers: out.Headers, Body: out.Payload}, nil
 	}
-	return e.forAuth(r.AuthID).HttpRequest(ctx, r)
+	return e.forAuth(r.AuthID, r.StorageJSON, r.Metadata).HttpRequest(ctx, r)
 }
 
 func buildRequest(_ context.Context, r pluginapi.ExecutorRequest) (pluginapi.HTTPRequest, error) {
@@ -90,7 +106,10 @@ func buildRequest(_ context.Context, r pluginapi.ExecutorRequest) (pluginapi.HTT
 		return pluginapi.HTTPRequest{}, &pluginabi.Error{Code: "invalid_request", Message: "payload must be a JSON object", HTTPStatus: 400}
 	}
 	var model string
-	if json.Unmarshal(body["model"], &model) != nil || !strings.HasPrefix(model, modelPrefix) || len(model) == len(modelPrefix) {
+	if err := json.Unmarshal(body["model"], &model); err != nil {
+		return pluginapi.HTTPRequest{}, &pluginabi.Error{Code: "invalid_model", Message: "expected a synthetic/ model", HTTPStatus: 400}
+	}
+	if model = stripHostPrefix(model, r.AuthMetadata); !strings.HasPrefix(model, modelPrefix) || len(model) == len(modelPrefix) {
 		return pluginapi.HTTPRequest{}, &pluginabi.Error{Code: "invalid_model", Message: "expected a synthetic/ model", HTTPStatus: 400}
 	}
 	model = strings.TrimPrefix(model, modelPrefix)

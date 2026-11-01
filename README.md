@@ -37,13 +37,18 @@ mode `0600`. Never put real auth files in this repository.
 The default/fixed ID is `synthetic:` followed by the first 12 hexadecimal digits
 of SHA-256 of the trimmed key. User-supplied `id` is rejected. Duplicate keys in
 different files are configuration errors; reparsing the same filename is safe.
+Two credentials must never share one host `prefix`: their per-account pinning
+namespaces would merge, so the second file is rejected with `duplicate_prefix`.
 Changing a key in a file releases that file's old key. Renaming/deleting auth
 files requires a plugin lifecycle restart to clear its in-memory duplicate-file
 ownership; do not copy an existing key into another file during a rename.
 
 Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`, `label`
 and `disabled`. The optional auth `prefix` does not replace the fixed model
-namespace. Login/poll operations report API-key-only; refresh preserves storage
+namespace. Under per-credential pinning the payload model may still carry the
+host prefix (`<acct>/synthetic/<id>`); one leading `<prefix>/` segment is
+stripped before the provider-prefix check, so pinned and unpinned callers take
+the same path. Login/poll operations report API-key-only; refresh preserves storage
 and performs no upstream request. API keys cannot be refreshed by this plugin.
 
 ## Models and execution
@@ -91,7 +96,14 @@ Parser priority is `planWeeklyLimit` > `weeklyTokenLimit` >
 `rollingFiveHourLimit` > legacy `subscription`. Current weekly credits are shown
 as remaining fraction and percent. A regeneration timestamp is the **next
 increment, not a full weekly reset**. Legacy five-hour/subscription cards appear
-only if those shapes are actually returned. No numeric plan allowance is
+only if those shapes are actually returned. The legacy `subscription` shape
+reports absolute counters, surfaced in Summary as `subscription_requests_used`
+and `subscription_request_limit` so callers derive utilization instead of
+dividing by an assumed limit. Classification hints are bound to the credential
+generation that produced them: a rotated key under a reused identity never
+inherits the previous generation's regeneration evidence, while header
+observations (which carry no credential context) serve every generation until
+the 60-second TTL expires. No numeric plan allowance is
 hard-coded. Quota reset is unsupported; a web-UI reset entitlement is not an API.
 
 | Upstream result | Plugin classification | Retry guidance |
@@ -138,7 +150,7 @@ nm -D <output-dir>/synthetic.so | grep cliproxy_plugin_init
 bash scripts/package-release.sh <output-dir>
 ```
 
-The package script creates `synthetic_0.1.2_linux_amd64.zip` containing
+The package script creates `synthetic_0.1.3_linux_amd64.zip` containing
 `synthetic.so` and `LICENSE`, plus `checksums.txt` for the archive. It does not
 publish, install or reload anything. Publish both files together to a matching
 GitHub release; `registry.json` uses the native schema-v1 GitHub-release contract.

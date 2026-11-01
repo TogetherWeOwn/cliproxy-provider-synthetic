@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"sync"
 	"time"
@@ -14,7 +15,19 @@ import (
 type quotaProvider struct {
 	cache    *providerkit.CachedQuota
 	mu       sync.Mutex
-	readings map[string]timedReading
+	readings map[readingKey]timedReading
+}
+
+// readingKey binds a classification hint to the credential generation that
+// produced it (G-K3). A rotated key under a reused auth identity digests
+// differently, so the previous generation's regeneration evidence can never
+// classify the new generation's 429s. Header observations arrive without
+// credential context and stay unbound (hasCred false), served to every
+// generation until the TTL expires — the same fast path the kit cache keeps.
+type readingKey struct {
+	id      string
+	cred    [32]byte
+	hasCred bool
 }
 type timedReading struct {
 	reading    quotaReading
@@ -22,9 +35,20 @@ type timedReading struct {
 	expires    time.Time
 }
 
+// credentialDigest identifies the credential generation behind a request. Only
+// the API key feeds the digest — proxy or metadata drift must not orphan quota
+// evidence, while a key rotation must. When the key is unparseable the raw
+// storage feeds it instead: still stable per generation, never logged.
+func credentialDigest(storage []byte, meta map[string]any) [32]byte {
+	if key, err := providerkit.APIKey(storage, meta); err == nil {
+		return sha256.Sum256([]byte(key))
+	}
+	return sha256.Sum256(storage)
+}
+
 // These observations are response-classification hints only. They never select
 // an account, avoid an account preemptively, or alter the host's scheduler.
-func (q *quotaProvider) remember(id string, reading quotaReading, observedAt time.Time) {
+func (q *quotaProvider) remember(id string, cred [32]byte, hasCred bool, reading quotaReading, observedAt time.Time) {
 	if id == "" {
 		return
 	}
@@ -32,30 +56,47 @@ func (q *quotaProvider) remember(id string, reading quotaReading, observedAt tim
 	defer q.mu.Unlock()
 	now := time.Now()
 	if q.readings == nil {
-		q.readings = make(map[string]timedReading)
+		q.readings = make(map[readingKey]timedReading)
 	}
 	for key, r := range q.readings {
 		if !now.Before(r.expires) {
 			delete(q.readings, key)
 		}
 	}
-	if current, ok := q.readings[id]; ok && current.observedAt.After(observedAt) {
+	key := readingKey{id: id, cred: cred, hasCred: hasCred}
+	if current, ok := q.readings[key]; ok && current.observedAt.After(observedAt) {
 		return
 	}
-	q.readings[id] = timedReading{reading: reading, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
+	q.readings[key] = timedReading{reading: reading, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
 }
-func (q *quotaProvider) latest(id string) *quotaReading {
+func (q *quotaProvider) latest(id string, cred [32]byte) *quotaReading {
 	if q == nil {
 		return nil
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	r, ok := q.readings[id]
-	if !ok || !time.Now().Before(r.expires) {
-		delete(q.readings, id)
+	now := time.Now()
+	var best *timedReading
+	for key, r := range q.readings {
+		if key.id != id {
+			continue
+		}
+		if !now.Before(r.expires) {
+			delete(q.readings, key)
+			continue
+		}
+		if key.hasCred && key.cred != cred {
+			continue
+		}
+		if best == nil || r.observedAt.After(best.observedAt) {
+			entry := r
+			best = &entry
+		}
+	}
+	if best == nil {
 		return nil
 	}
-	reading := r.reading
+	reading := best.reading
 	return &reading
 }
 func quotaIdentity(id, index string) string {
@@ -82,7 +123,7 @@ func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
 		if err != nil {
 			return pluginapi.QuotaFetchResponse{}, err
 		}
-		q.remember(quotaIdentity(req.AuthID, req.AuthIndex), reading, observedAt)
+		q.remember(quotaIdentity(req.AuthID, req.AuthIndex), credentialDigest(req.StorageJSON, req.Metadata), true, reading, observedAt)
 		return normalizeQuota(reading), nil
 	})
 	return q
@@ -108,8 +149,17 @@ func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
 		bucket.Description += fmt.Sprintf(" (next increment %.2g%%)", *reading.NextRegenPercent)
 	}
 	out := pluginapi.QuotaFetchResponse{Groups: []pluginapi.QuotaGroup{{DisplayName: name, Buckets: []pluginapi.QuotaBucket{bucket}}}}
-	if window == "weekly" {
+	switch {
+	case window == "weekly":
 		out.Summary = []pluginapi.QuotaMetric{{Key: "weekly_credits_remaining_percent", Label: "Remaining", Value: percent, Unit: "%", Format: "number"}}
+	case window == "subscription" && reading.Limit != nil && reading.Requests != nil:
+		// The legacy subscription shape reports absolute counters, not a
+		// percentage: surface both so the connector can derive usedPercent
+		// instead of dividing by an assumed limit (G-S3).
+		out.Summary = []pluginapi.QuotaMetric{
+			{Key: "subscription_requests_used", Label: "Used", Value: *reading.Requests, Unit: "requests", Format: "number"},
+			{Key: "subscription_request_limit", Label: "Limit", Value: *reading.Limit, Unit: "requests", Format: "number"},
+		}
 	}
 	return out
 }
@@ -120,7 +170,9 @@ func (q *quotaProvider) HandleUsage(_ context.Context, record pluginapi.UsageRec
 		return
 	}
 	if reading, ok := quotaFromHeaders(record.ResponseHeaders); ok {
-		q.remember(quotaIdentity(record.AuthID, record.AuthIndex), reading, time.Now())
+		// UsageRecords carry no credential context, so header observations stay
+		// unbound: served to every generation of the identity until the TTL.
+		q.remember(quotaIdentity(record.AuthID, record.AuthIndex), [32]byte{}, false, reading, time.Now())
 		_ = q.cache.Store(pluginapi.QuotaFetchRequest{Provider: record.Provider, AuthID: record.AuthID, AuthIndex: record.AuthIndex}, normalizeQuota(reading))
 	}
 }

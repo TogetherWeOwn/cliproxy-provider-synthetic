@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +22,22 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 	if result, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("package: %v\n%s", err, result)
 	}
-	archive := filepath.Join(out, "synthetic_0.1.2_linux_amd64.zip")
+	// The archive name tracks registry.json, the same source the packaging
+	// script reads, so version bumps cannot desynchronize the two.
+	var registry struct {
+		Plugins []struct {
+			Version string `json:"version"`
+		} `json:"plugins"`
+	}
+	rawRegistry, err := os.ReadFile("registry.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(rawRegistry, &registry); err != nil || len(registry.Plugins) != 1 {
+		t.Fatalf("invalid registry.json: %v", err)
+	}
+	name := "synthetic_" + registry.Plugins[0].Version + "_linux_amd64.zip"
+	archive := filepath.Join(out, name)
 	raw, err := os.ReadFile(archive)
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +47,7 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(checksums), hex.EncodeToString(sum[:])+"  synthetic_0.1.2_linux_amd64.zip") {
+	if !strings.Contains(string(checksums), hex.EncodeToString(sum[:])+"  "+name) {
 		t.Fatalf("incorrect checksums %s", checksums)
 	}
 	reader, err := zip.OpenReader(archive)
