@@ -22,7 +22,7 @@ per-tier numeric limits, concurrency allowances or exact exhaustion error
 contracts for all accounts. Those remain pending live verification; historical
 fixtures are not current entitlement guarantees.
 
-The native behavior references are CLIProxyAPI v8.0.48:
+The native behavior references are CLIProxyAPI v8.0.49:
 
 - `sdk/pluginabi/types.go`: ABI/RPC envelopes and retry timing.
 - `internal/pluginhost/rpc_client.go`: RPC-to-host error adaptation.

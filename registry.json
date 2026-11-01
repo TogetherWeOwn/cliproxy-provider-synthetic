@@ -7,7 +7,7 @@
       "description": "API-key authentication, namespaced OpenAI chat models and read-only Synthetic quota cards",
       "author": "TogetherWeOwn",
       "repository": "https://github.com/TogetherWeOwn/cliproxy-provider-synthetic",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "license": "MIT",
       "tags": ["provider", "synthetic", "quota"],
       "install": {"type": "github-release"}
