@@ -10,7 +10,10 @@ import (
 )
 
 func TestAuthDuplicateKeyAndReload(t *testing.T) {
-	p := newAuthProvider()
+	p, err := newAuthProvider()
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	parse := func(file, raw string) (pluginapi.AuthParseResponse, error) {
 		return p.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: file, RawJSON: []byte(raw)})
@@ -37,11 +40,10 @@ func TestAuthDuplicateKeyAndReload(t *testing.T) {
 			t.Fatalf("accepted %s", raw)
 		}
 	}
+	// StartLogin without a host base URL still fails; the wired login flow
+	// (page, submit, poll) is covered by TestAPIKeyLoginRoundTrip.
 	if _, err = p.StartLogin(ctx, pluginapi.AuthLoginStartRequest{}); err == nil {
-		t.Fatal("API key provider offered login")
-	}
-	if _, err = p.PollLogin(ctx, pluginapi.AuthLoginPollRequest{}); err == nil {
-		t.Fatal("API key provider polled login")
+		t.Fatal("login started without a host base URL")
 	}
 	refreshed, err := p.RefreshAuth(ctx, pluginapi.AuthRefreshRequest{AuthID: a.Auth.ID, StorageJSON: a.Auth.StorageJSON, Metadata: a.Auth.Metadata})
 	if err != nil || string(refreshed.Auth.StorageJSON) != string(a.Auth.StorageJSON) {

@@ -73,48 +73,77 @@ type quotaWire struct {
 
 var errNoQuotaShape = errors.New("quota payload has no recognized limit")
 
-func parseQuota(raw []byte) (quotaReading, error) {
+// parseQuotas returns one reading per quota shape present in the payload:
+// weekly (current plan preferred), rolling-5h (legacy request
+// packs), and subscription (the documented example). Shape order follows the
+// wire struct, so parseQuota's historical first-match result is readings[0].
+// planWeeklyLimit and weeklyTokenLimit are the same weekly-credits bucket in
+// its current and legacy form, so a payload reporting both keeps only the
+// current plan shape instead of rendering two identical "Weekly credits" cards.
+func parseQuotas(raw []byte) ([]quotaReading, error) {
 	var wire quotaWire
 	if err := json.Unmarshal(raw, &wire); err != nil {
-		return quotaReading{}, fmt.Errorf("decode quota payload")
+		return nil, fmt.Errorf("decode quota payload")
 	}
-	switch {
-	case wire.PlanWeeklyLimit != nil && wire.PlanWeeklyLimit.PercentRemaining != nil:
+	var readings []quotaReading
+	hasPlanWeekly := wire.PlanWeeklyLimit != nil && wire.PlanWeeklyLimit.PercentRemaining != nil
+	if hasPlanWeekly {
 		w := wire.PlanWeeklyLimit
-		return quotaReading{PercentRemaining: floatPtr(*w.PercentRemaining), NextRegenAt: parseTime(w.NextRegenAt), NextRegenPercent: copyFloat(w.NextRegenPercent), Shape: "planWeeklyLimit"}, nil
-	case wire.WeeklyTokenLimit != nil && wire.WeeklyTokenLimit.PercentRemaining != nil:
+		readings = append(readings, quotaReading{PercentRemaining: floatPtr(*w.PercentRemaining), NextRegenAt: parseTime(w.NextRegenAt), NextRegenPercent: copyFloat(w.NextRegenPercent), Shape: "planWeeklyLimit"})
+	}
+	if !hasPlanWeekly && wire.WeeklyTokenLimit != nil && wire.WeeklyTokenLimit.PercentRemaining != nil {
 		w := wire.WeeklyTokenLimit
-		return quotaReading{PercentRemaining: floatPtr(*w.PercentRemaining), NextRegenAt: parseTime(w.NextRegenAt), Shape: "weeklyTokenLimit"}, nil
-	case wire.RollingFiveHourLimit != nil && wire.RollingFiveHourLimit.Remaining != nil && wire.RollingFiveHourLimit.Max != nil && *wire.RollingFiveHourLimit.Max > 0:
+		readings = append(readings, quotaReading{PercentRemaining: floatPtr(*w.PercentRemaining), NextRegenAt: parseTime(w.NextRegenAt), Shape: "weeklyTokenLimit"})
+	}
+	if wire.RollingFiveHourLimit != nil && wire.RollingFiveHourLimit.Remaining != nil && wire.RollingFiveHourLimit.Max != nil && *wire.RollingFiveHourLimit.Max > 0 {
 		w := wire.RollingFiveHourLimit
 		reading := quotaReading{PercentRemaining: floatPtr(*w.Remaining / *w.Max * 100), NextRegenAt: parseTime(w.NextTickAt), Shape: "rollingFiveHourLimit"}
 		if w.TickPercent != nil {
 			reading.NextRegenPercent = floatPtr(*w.TickPercent * 100)
 		}
-		return reading, nil
-	case wire.Subscription != nil && wire.Subscription.Limit != nil && wire.Subscription.Requests != nil && *wire.Subscription.Limit > 0:
-		w := wire.Subscription
-		return quotaReading{PercentRemaining: floatPtr((*w.Limit - *w.Requests) / *w.Limit * 100), NextRegenAt: parseTime(w.RenewsAt), Shape: "subscription"}, nil
-	default:
-		return quotaReading{}, errNoQuotaShape
+		readings = append(readings, reading)
 	}
+	if wire.Subscription != nil && wire.Subscription.Limit != nil && wire.Subscription.Requests != nil && *wire.Subscription.Limit > 0 {
+		w := wire.Subscription
+		readings = append(readings, quotaReading{PercentRemaining: floatPtr((*w.Limit - *w.Requests) / *w.Limit * 100), NextRegenAt: parseTime(w.RenewsAt), Shape: "subscription"})
+	}
+	if len(readings) == 0 {
+		return nil, errNoQuotaShape
+	}
+	return readings, nil
 }
 
-// quotaFromHeaders reads the x-synthetic-quotas header Synthetic attaches to
-// inference responses. It returns ok=false when the header is absent or
-// unparseable.
-func quotaFromHeaders(headers http.Header) (quotaReading, bool) {
+func parseQuota(raw []byte) (quotaReading, error) {
+	readings, err := parseQuotas(raw)
+	if err != nil {
+		return quotaReading{}, err
+	}
+	return readings[0], nil
+}
+
+// quotaReadingsFromHeaders reads the x-synthetic-quotas header Synthetic
+// attaches to inference responses, keeping every shape the header reports.
+// It returns ok=false when the header is absent or unparseable.
+func quotaReadingsFromHeaders(headers http.Header) ([]quotaReading, bool) {
 	for name, values := range headers {
 		if !strings.EqualFold(strings.TrimSpace(name), quotaHeader) {
 			continue
 		}
 		for _, value := range values {
-			if reading, err := parseQuota([]byte(value)); err == nil {
-				return reading, true
+			if readings, err := parseQuotas([]byte(value)); err == nil {
+				return readings, true
 			}
 		}
 	}
-	return quotaReading{}, false
+	return nil, false
+}
+
+func quotaFromHeaders(headers http.Header) (quotaReading, bool) {
+	readings, ok := quotaReadingsFromHeaders(headers)
+	if !ok || len(readings) == 0 {
+		return quotaReading{}, false
+	}
+	return readings[0], true
 }
 
 // newQuotaHTTPClient follows the proxy that the kit's CachedQuota attaches to
@@ -128,40 +157,49 @@ func newQuotaHTTPClient() *http.Client {
 	return client
 }
 
-// fetchQuota performs one bounded GET of the quota endpoint. Errors are
-// generic: neither the API key nor the response body is ever included.
-func fetchQuota(ctx context.Context, client httpDoer, endpoint, apiKey string) (quotaReading, error) {
+// fetchQuotas performs one bounded GET of the quota endpoint and returns one
+// reading per shape the payload reports. Errors are generic: neither the API
+// key nor the response body is ever included.
+func fetchQuotas(ctx context.Context, client httpDoer, endpoint, apiKey string) ([]quotaReading, error) {
 	if client == nil || endpoint == "" || apiKey == "" {
-		return quotaReading{}, fmt.Errorf("quota poll not configured")
+		return nil, fmt.Errorf("quota poll not configured")
 	}
 	ctx, cancel := context.WithTimeout(ctx, defaultQuotaTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return quotaReading{}, fmt.Errorf("build quota request")
+		return nil, fmt.Errorf("build quota request")
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return quotaReading{}, fmt.Errorf("quota request failed")
+		return nil, fmt.Errorf("quota request failed")
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQuotaResponse+1))
 	if err != nil {
-		return quotaReading{}, fmt.Errorf("read quota response")
+		return nil, fmt.Errorf("read quota response")
 	}
 	if len(body) > maxQuotaResponse {
-		return quotaReading{}, fmt.Errorf("quota response too large")
+		return nil, fmt.Errorf("quota response too large")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return quotaReading{}, fmt.Errorf("quota endpoint returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("quota endpoint returned HTTP %d", resp.StatusCode)
 	}
-	reading, err := parseQuota(body)
+	readings, err := parseQuotas(body)
+	if err != nil {
+		return nil, err
+	}
+	return readings, nil
+}
+
+func fetchQuota(ctx context.Context, client httpDoer, endpoint, apiKey string) (quotaReading, error) {
+	readings, err := fetchQuotas(ctx, client, endpoint, apiKey)
 	if err != nil {
 		return quotaReading{}, err
 	}
-	return reading, nil
+	return readings[0], nil
 }
 
 func parseTime(raw string) time.Time {

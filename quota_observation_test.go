@@ -32,7 +32,7 @@ func TestLateQuotaPollCannotOverwriteNewerHeaderRetryEvidence(t *testing.T) {
 	if err := <-finished; err != nil {
 		t.Fatal(err)
 	}
-	e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429}, now, q.latest("account"))
+	e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429}, now, q.latestOne("account"))
 	if e.RetryAfterSeconds != 120 {
 		t.Fatalf("older poll replaced header retry evidence: %+v", e)
 	}

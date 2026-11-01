@@ -25,7 +25,7 @@ func newExecutor(q *quotaProvider) executor {
 func (e executor) forAuth(id string) kit.Passthrough {
 	p := e.Passthrough
 	p.ClassifyError = func(resp pluginapi.HTTPResponse) error {
-		return classifyWithQuota(resp, time.Now(), e.quota.latest(id))
+		return classifyWithQuota(resp, time.Now(), e.quota.latestOne(id))
 	}
 	return p
 }

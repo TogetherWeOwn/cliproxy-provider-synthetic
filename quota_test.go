@@ -40,6 +40,30 @@ func TestParseQuotaShapes(t *testing.T) {
 	}
 }
 
+func TestParseQuotaPrefersPlanWeeklyOverLegacyToken(t *testing.T) {
+	raw := `{"planWeeklyLimit":{"percentRemaining":72.5,"nextRegenAt":"2026-10-23T09:00:00.000Z","nextRegenPercent":2},` +
+		`"weeklyTokenLimit":{"percentRemaining":40,"nextRegenAt":"2026-10-23T09:00:00Z"}}`
+	readings, err := parseQuotas([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(readings) != 1 || readings[0].Shape != "planWeeklyLimit" || *readings[0].PercentRemaining != 72.5 {
+		t.Fatalf("dual weekly shapes must keep only the plan shape: %+v", readings)
+	}
+	got := normalizeQuotas([]quotaReading{
+		{PercentRemaining: floatPtr(72.5), Shape: "planWeeklyLimit"},
+		{PercentRemaining: floatPtr(40), Shape: "weeklyTokenLimit"},
+	})
+	if len(got.Groups) != 1 || got.Groups[0].DisplayName != "Weekly credits" || got.Groups[0].Buckets[0].Window != "weekly" {
+		t.Fatalf("dual weekly shapes must render one weekly card: %+v", got)
+	}
+	// Legacy token shape alone still renders the weekly card.
+	legacy, err := parseQuotas([]byte(`{"weeklyTokenLimit":{"percentRemaining":40,"nextRegenAt":"2026-10-23T09:00:00Z"}}`))
+	if err != nil || len(legacy) != 1 || legacy[0].Shape != "weeklyTokenLimit" {
+		t.Fatalf("legacy-only payload must keep its shape: %+v %v", legacy, err)
+	}
+}
+
 func TestParseQuotaUtilization(t *testing.T) {
 	reading, err := parseQuota([]byte(`{"planWeeklyLimit":{"percentRemaining":3,"nextRegenAt":"2026-10-23T09:00:00Z","nextRegenPercent":2}}`))
 	if err != nil {
