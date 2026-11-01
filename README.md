@@ -73,8 +73,11 @@ or an upstream billable operation.
 
 `infinite:*` always sends upstream `stream:true`. For a non-streaming client, SSE
 is aggregated into one `chat.completion`, including indexed choices, fragmented
-tool calls, reasoning and summed reported usage. Truncated/malformed streams
-fail rather than invent a successful result. Aggregation is bounded to 32 MiB
+tool calls, reasoning and summed reported usage. Malformed streams, and streams
+that end before every choice carries a finish reason, fail rather than invent
+a successful result; a clean channel close after complete choices is the
+terminal marker (the kit drops the upstream `[DONE]`), so a stream cut after
+its final choice succeeds with complete content. Aggregation is bounded to 32 MiB
 total; each upstream event is additionally bounded by the kit's 8 MiB SSE event
 limit. It does not change which account/model the host selects.
 
