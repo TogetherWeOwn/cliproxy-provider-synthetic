@@ -3,7 +3,7 @@
 First-class Synthetic API-key auth files, namespaced model discovery, OpenAI
 chat execution and read-only quota cards. Built on
 [`cliproxy-provider-kit`](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
-at `de8b318` (v0.1.0 plus quota proxy support)
+at `c81b686` (accepts newer host RPC schemas, still answers schema 9)
 and tested with the **real CLIProxyAPI v8.0.48 C-ABI loader** (ABI 1, RPC schema 9).
 
 Multiple distinct-key auth files use the host's native routing and cooldowns.
@@ -137,7 +137,7 @@ nm -D <output-dir>/synthetic.so | grep cliproxy_plugin_init
 bash scripts/package-release.sh <output-dir>
 ```
 
-The package script creates `synthetic_0.1.0_linux_amd64.zip` containing
+The package script creates `synthetic_0.1.1_linux_amd64.zip` containing
 `synthetic.so` and `LICENSE`, plus `checksums.txt` for the archive. It does not
 publish, install or reload anything. Publish both files together to a matching
 GitHub release; `registry.json` uses the native schema-v1 GitHub-release contract.
