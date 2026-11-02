@@ -37,6 +37,38 @@ func TestQuotaProviderPollAndHeader(t *testing.T) {
 		t.Fatalf("header did not replace cached poll: %+v %v", result, err)
 	}
 }
+func TestQuotaPollSurfacesPlanChip(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"planWeeklyLimit":{"percentRemaining":50}}`))
+	}))
+	defer s.Close()
+	q := newQuotaProvider(s.URL, s.Client())
+	for _, tc := range []struct {
+		name    string
+		storage string
+		want    string
+	}{
+		{"plan field becomes the plan chip", `{"api_key":"example-key","plan":"go"}`, "go"},
+		{"missing plan leaves no subscription", `{"api_key":"example-key"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := q.cache.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: tc.name, StorageJSON: []byte(tc.storage)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if result.Subscription != nil {
+				got = result.Subscription.Plan
+			}
+			if got != tc.want {
+				t.Fatalf("plan chip = %q, want %q: %+v", got, tc.want, result.Subscription)
+			}
+			if violations := providerkit.CheckCard(result); len(violations) != 0 {
+				t.Fatalf("CheckCard violations: %v", violations)
+			}
+		})
+	}
+}
 func TestQuotaUsageRejectsForeignProvider(t *testing.T) {
 	q := newQuotaProvider("", nil)
 	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "foreign", AuthID: "a", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
