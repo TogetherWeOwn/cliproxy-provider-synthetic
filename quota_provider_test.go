@@ -69,6 +69,34 @@ func TestQuotaPollSurfacesPlanChip(t *testing.T) {
 		})
 	}
 }
+
+// A header update carries no auth fields, so it must keep the plan chip the
+// poll attached instead of wiping it until the next poll.
+func TestQuotaHeaderPreservesPlanChip(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"planWeeklyLimit":{"percentRemaining":25}}`))
+	}))
+	defer s.Close()
+	q := newQuotaProvider(s.URL, s.Client())
+	req := pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: "plan-auth", StorageJSON: []byte(`{"api_key":"example-key","plan":"big"}`)}
+	if _, err := q.cache.FetchQuota(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "synthetic", AuthID: "plan-auth", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
+	result, err := q.cache.FetchQuota(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Groups[0].Buckets[0].RemainingFraction != 0.8 {
+		t.Fatalf("header did not update the bar: %+v", result)
+	}
+	if result.Subscription == nil || result.Subscription.Plan != "big" {
+		t.Fatalf("header wiped the plan chip: %+v", result.Subscription)
+	}
+	if violations := providerkit.CheckCard(result); len(violations) != 0 {
+		t.Fatalf("CheckCard violations: %v", violations)
+	}
+}
 func TestQuotaUsageRejectsForeignProvider(t *testing.T) {
 	q := newQuotaProvider("", nil)
 	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "foreign", AuthID: "a", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
