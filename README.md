@@ -157,7 +157,7 @@ nm -D <output-dir>/synthetic.so | grep cliproxy_plugin_init
 bash scripts/package-release.sh <output-dir>
 ```
 
-The package script creates `synthetic_0.2.2_linux_amd64.zip` containing
+The package script creates `synthetic_0.2.3_linux_amd64.zip` containing
 `synthetic.so` and `LICENSE`, plus `checksums.txt` for the archive. It does not
 publish, install or reload anything. Publish both files together to a matching
 GitHub release; `registry.json` uses the native schema-v1 GitHub-release contract.
