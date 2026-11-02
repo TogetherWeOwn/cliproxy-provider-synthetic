@@ -103,8 +103,9 @@ as fresh; polling errors do not fabricate quota.
 
 Every shape the quota payload reports gets one bucket in a single `Synthetic`
 group: weekly (`planWeeklyLimit`, `weeklyTokenLimit`) as `weekly`, rolling
-five-hour (`rollingFiveHourLimit`) as `5h`, and legacy `subscription` under
-its own name. Buckets carry the window id only, with no description, and the
+five-hour (`rollingFiveHourLimit`) as `5h`, and legacy `subscription` as
+`Renewal` (short enough to render beside its renewal timestamp).
+Buckets carry the window id only, with no description, and the
 card carries no summary chips: regeneration percents are incremental hints,
 not plan data. A regeneration timestamp is the **next increment, not a full
 reset**, so it is never shown for weekly ticks — only `subscription`
