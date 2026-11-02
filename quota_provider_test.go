@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	providerkit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -26,13 +27,104 @@ func TestQuotaProviderPollAndHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 || result.Groups[0].Buckets[0].RemainingFraction != 0.25 || result.Groups[0].Buckets[0].ResetTime != "2030-01-01T00:00:00Z" {
+	// The weekly nextRegenAt is an incremental refill, not a reset, and the
+	// card carries no refill chip — so the row keeps no reset time.
+	if count != 1 || result.Groups[0].Buckets[0].Window != "weekly" || result.Groups[0].Buckets[0].RemainingFraction != 0.25 || result.Groups[0].Buckets[0].ResetTime != "" {
 		t.Fatalf("unexpected quota result: %+v", result)
 	}
 	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "synthetic", AuthID: "a", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
 	result, err = q.cache.FetchQuota(context.Background(), req)
 	if err != nil || result.Groups[0].Buckets[0].RemainingFraction != 0.8 || count != 1 {
 		t.Fatalf("header did not replace cached poll: %+v %v", result, err)
+	}
+}
+func TestQuotaPollSurfacesPlanChip(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"planWeeklyLimit":{"percentRemaining":50}}`))
+	}))
+	defer s.Close()
+	q := newQuotaProvider(s.URL, s.Client())
+	for _, tc := range []struct {
+		name    string
+		storage string
+		want    string
+	}{
+		{"plan field becomes the plan chip", `{"api_key":"example-key","plan":"go"}`, "go"},
+		{"missing plan leaves no subscription", `{"api_key":"example-key"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := q.cache.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: tc.name, StorageJSON: []byte(tc.storage)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if result.Subscription != nil {
+				got = result.Subscription.Plan
+			}
+			if got != tc.want {
+				t.Fatalf("plan chip = %q, want %q: %+v", got, tc.want, result.Subscription)
+			}
+			if violations := providerkit.CheckCard(result); len(violations) != 0 {
+				t.Fatalf("CheckCard violations: %v", violations)
+			}
+		})
+	}
+}
+
+// A header update carries no auth fields, so it must keep the plan chip the
+// poll attached instead of wiping it until the next poll.
+func TestQuotaHeaderPreservesPlanChip(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"planWeeklyLimit":{"percentRemaining":25}}`))
+	}))
+	defer s.Close()
+	q := newQuotaProvider(s.URL, s.Client())
+	req := pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: "plan-auth", StorageJSON: []byte(`{"api_key":"example-key","plan":"big"}`)}
+	if _, err := q.cache.FetchQuota(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "synthetic", AuthID: "plan-auth", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
+	result, err := q.cache.FetchQuota(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Groups[0].Buckets[0].RemainingFraction != 0.8 {
+		t.Fatalf("header did not update the bar: %+v", result)
+	}
+	if result.Subscription == nil || result.Subscription.Plan != "big" {
+		t.Fatalf("header wiped the plan chip: %+v", result.Subscription)
+	}
+	if violations := providerkit.CheckCard(result); len(violations) != 0 {
+		t.Fatalf("CheckCard violations: %v", violations)
+	}
+}
+
+// A plan edited while traffic flows must not read stale forever: once the
+// remembered plan passes its max age, header updates drop the chip instead
+// of repeating the wrong plan until a poll refreshes it.
+func TestQuotaHeaderDropsStalePlan(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"planWeeklyLimit":{"percentRemaining":25}}`))
+	}))
+	defer s.Close()
+	q := newQuotaProvider(s.URL, s.Client())
+	now := time.Now()
+	q.now = func() time.Time { return now }
+	req := pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: "edit-auth", StorageJSON: []byte(`{"api_key":"example-key","plan":"big"}`)}
+	if _, err := q.cache.FetchQuota(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(planMaxAge + time.Minute)
+	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "synthetic", AuthID: "edit-auth", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
+	result, err := q.cache.FetchQuota(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Groups[0].Buckets[0].RemainingFraction != 0.8 {
+		t.Fatalf("header did not update the bar: %+v", result)
+	}
+	if result.Subscription != nil {
+		t.Fatalf("stale plan must drop instead of repeating: %+v", result.Subscription)
 	}
 }
 func TestQuotaUsageRejectsForeignProvider(t *testing.T) {
@@ -50,7 +142,7 @@ func TestLegacyQuotaDoesNotClaimWeeklyCredits(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := normalizeQuota(r)
-	if len(got.Groups) != 1 || got.Groups[0].Buckets[0].Window == "Weekly credits" {
+	if len(got.Groups) != 1 || got.Groups[0].Buckets[0].Window == "weekly" {
 		t.Fatalf("legacy five-hour quota mislabeled as weekly credits: %+v", got)
 	}
 	if len(got.Summary) != 0 {
@@ -100,13 +192,13 @@ func TestMultiShapeQuotaEmitsOneBucketPerShape(t *testing.T) {
 	// The weekly nextRegenAt is an incremental refill with no quantified
 	// increment here, so it must not pose as a reset; the subscription
 	// renewal is a genuine reset and keeps its timestamp.
-	if resets["Weekly credits"] != "" {
+	if resets["weekly"] != "" {
 		t.Fatalf("incremental refill shown as reset: %+v", got)
 	}
 	if resets["Subscription"] == "" {
 		t.Fatalf("renewal lost its reset time: %+v", got)
 	}
-	if windows["Weekly credits"] != 0.25 || windows[providerkit.CardWindowFiveHour] != 0.5 || windows["Subscription"] != 0.6 {
+	if windows["weekly"] != 0.25 || windows[providerkit.CardWindowFiveHour] != 0.5 || windows["Subscription"] != 0.6 {
 		t.Fatalf("wrong per-shape fractions: %+v", got)
 	}
 	// None of these shapes regenerates, so no refill chip is emitted.
@@ -126,42 +218,35 @@ func TestMultiShapeQuotaEmitsOneBucketPerShape(t *testing.T) {
 	}
 }
 
-// A non-zero regeneration percent appears as a refill chip; a zero percent
-// and a missing percent emit no summary.
-func TestNextRefillChipOnlyWhenNonZero(t *testing.T) {
+// The card carries no refill chip: regeneration percents are incremental
+// hints, not plan data, so they stay off the card however they are reported.
+func TestNoRefillChip(t *testing.T) {
 	regen := func(pct *float64) pluginapi.QuotaFetchResponse {
 		return normalizeQuota(quotaReading{Shape: "planWeeklyLimit", PercentRemaining: floatPtr(25), NextRegenPercent: pct})
 	}
-	got := regen(floatPtr(2))
-	if len(got.Summary) != 1 || got.Summary[0].Key != "next_refill_percent" || got.Summary[0].Value != 2 {
-		t.Fatalf("refill chip missing: %+v", got)
+	for _, pct := range []*float64{floatPtr(2), floatPtr(0), nil} {
+		if got := regen(pct); len(got.Summary) != 0 {
+			t.Fatalf("refill percent must not emit a chip: %+v", got)
+		}
 	}
-	if violations := providerkit.CheckCard(got); len(violations) != 0 {
+	if got := regen(floatPtr(2)); len(got.Groups) != 1 || len(got.Groups[0].Buckets) != 1 {
+		t.Fatalf("bar missing without the chip: %+v", got)
+	}
+	if violations := providerkit.CheckCard(regen(floatPtr(2))); len(violations) != 0 {
 		t.Fatalf("CheckCard violations: %v", violations)
-	}
-	if got := regen(floatPtr(0)); len(got.Summary) != 0 {
-		t.Fatalf("zero refill must not emit a chip: %+v", got)
-	}
-	if got := regen(nil); len(got.Summary) != 0 {
-		t.Fatalf("missing refill must not emit a chip: %+v", got)
 	}
 }
 
-// The refill chip prefers a weekly increment over a five-hour tick, so the
-// chip next to the weekly bar never names the wrong refill. A lone
-// five-hour tick keeps its chip.
-func TestRefillChipPrefersWeeklyOverFiveHourTick(t *testing.T) {
+// Weekly and five-hour shapes render side by side as two bars with no
+// summary: neither tick poses as the other's refill.
+func TestRefillShapesRenderAsTwoBars(t *testing.T) {
 	weekly := quotaReading{Shape: "planWeeklyLimit", PercentRemaining: floatPtr(25), NextRegenPercent: floatPtr(2)}
 	tick := quotaReading{Shape: "rollingFiveHourLimit", PercentRemaining: floatPtr(50), NextRegenPercent: floatPtr(10)}
 	got := normalizeQuotas([]quotaReading{weekly, tick})
-	if len(got.Groups) != 1 || len(got.Summary) != 1 || got.Summary[0].Value != 2 {
-		t.Fatalf("weekly refill must win: %+v", got)
+	if len(got.Groups) != 1 || len(got.Groups[0].Buckets) != 2 || len(got.Summary) != 0 {
+		t.Fatalf("two shapes must render two bars and no summary: %+v", got)
 	}
 	if violations := providerkit.CheckCard(got); len(violations) != 0 {
 		t.Fatalf("CheckCard violations: %v", violations)
-	}
-	lone := normalizeQuotas([]quotaReading{tick})
-	if len(lone.Summary) != 1 || lone.Summary[0].Value != 10 {
-		t.Fatalf("lone five-hour tick lost its chip: %+v", lone)
 	}
 }

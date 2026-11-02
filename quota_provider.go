@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,22 +15,45 @@ type quotaProvider struct {
 	cache    *providerkit.CachedQuota
 	mu       sync.Mutex
 	readings map[string]timedReading
+	now      func() time.Time
 }
+
+// planMaxAge bounds how long a header update may repeat a remembered plan.
+// Headers carry no auth fields, so a plan edited mid-traffic would otherwise
+// read stale until a traffic gap lets a poll through; after this age the
+// chip drops instead of risking the wrong plan. Polls always reattach the
+// current plan.
+const planMaxAge = 10 * time.Minute
+
 type timedReading struct {
 	readings   []quotaReading
 	observedAt time.Time
 	expires    time.Time
+	// plan is the display-only auth plan remembered alongside the readings so
+	// a header update (which carries no auth fields) keeps the plan chip
+	// instead of wiping it until the next poll.
+	plan string
+	// planAt is when that plan was last reported by a poll; header-only
+	// remembers never move it.
+	planAt time.Time
+}
+
+func (q *quotaProvider) clock() time.Time {
+	if q != nil && q.now != nil {
+		return q.now()
+	}
+	return time.Now()
 }
 
 // These observations are response-classification hints only. They never select
 // an account, avoid an account preemptively, or alter the host's scheduler.
-func (q *quotaProvider) remember(id string, readings []quotaReading, observedAt time.Time) {
+func (q *quotaProvider) remember(id string, readings []quotaReading, observedAt time.Time, plan string) {
 	if id == "" || len(readings) == 0 {
 		return
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	now := time.Now()
+	now := q.clock()
 	if q.readings == nil {
 		q.readings = make(map[string]timedReading)
 	}
@@ -43,7 +67,36 @@ func (q *quotaProvider) remember(id string, readings []quotaReading, observedAt 
 	}
 	kept := make([]quotaReading, len(readings))
 	copy(kept, readings)
-	q.readings[id] = timedReading{readings: kept, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
+	next := timedReading{readings: kept, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
+	if plan != "" {
+		next.plan, next.planAt = plan, observedAt
+	} else if current, ok := q.readings[id]; ok {
+		// A poll without a plan field (or a header, which never carries
+		// one) must not wipe a plan a previous poll remembered.
+		next.plan, next.planAt = current.plan, current.planAt
+	}
+	q.readings[id] = next
+}
+
+// planFor returns the remembered display-only plan for an auth, or "" when
+// none was reported, the observation expired, or the plan itself is older
+// than planMaxAge (an edited plan then drops the chip instead of showing the
+// wrong one until a poll refreshes it).
+func (q *quotaProvider) planFor(id string) string {
+	if q == nil || id == "" {
+		return ""
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	r, ok := q.readings[id]
+	if !ok || !q.clock().Before(r.expires) {
+		delete(q.readings, id)
+		return ""
+	}
+	if r.plan == "" || r.planAt.IsZero() || q.clock().Sub(r.planAt) >= planMaxAge {
+		return ""
+	}
+	return r.plan
 }
 func (q *quotaProvider) latest(id string) []quotaReading {
 	if q == nil {
@@ -95,8 +148,20 @@ func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
 		if err != nil {
 			return pluginapi.QuotaFetchResponse{}, err
 		}
-		q.remember(quotaIdentity(req.AuthID, req.AuthIndex), readings, observedAt)
-		return normalizeQuotas(readings), nil
+		// The plan field is display-only: the panel shows it as the plan
+		// chip, and it never affects admission or identity.
+		plan := ""
+		if fields, ferr := providerkit.AuthFields(req.StorageJSON, req.Metadata); ferr == nil {
+			if p, ok := fields["plan"].(string); ok {
+				plan = strings.TrimSpace(p)
+			}
+		}
+		q.remember(quotaIdentity(req.AuthID, req.AuthIndex), readings, observedAt, plan)
+		out := normalizeQuotas(readings)
+		if plan != "" {
+			out.Subscription = &pluginapi.QuotaSubscription{Plan: plan}
+		}
+		return out, nil
 	})
 	return q
 }
@@ -106,7 +171,7 @@ func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
 		return pluginapi.QuotaFetchResponse{}
 	}
 	percent := clamp(*reading.PercentRemaining, 0, 100)
-	window := "Weekly credits"
+	window := providerkit.CardWindowWeekly
 	fullReset := false
 	switch reading.Shape {
 	case "rollingFiveHourLimit":
@@ -117,13 +182,11 @@ func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
 	}
 	bucket := pluginapi.QuotaBucket{Window: window, RemainingFraction: percent / 100}
 	out := pluginapi.QuotaFetchResponse{Groups: []pluginapi.QuotaGroup{{DisplayName: "Synthetic", Buckets: []pluginapi.QuotaBucket{bucket}}}}
-	if reading.NextRegenPercent != nil && *reading.NextRegenPercent != 0 {
-		out.Summary = []pluginapi.QuotaMetric{{Key: "next_refill_percent", Label: "Next refill", Value: *reading.NextRegenPercent, Unit: "%", Format: "number"}}
-	}
-	// NextRegenAt marks an incremental refill, not a full reset. Surface it as
-	// the row's reset time only alongside the refill chip that names the
-	// increment, or for subscription renewals, which do reset the allowance.
-	if !reading.NextRegenAt.IsZero() && (len(out.Summary) > 0 || fullReset) {
+	// NextRegenAt marks an incremental refill, not a full reset, and the card
+	// carries no refill chip naming the increment — so a weekly tick must not
+	// pose as a reset. Only a subscription renewal resets the allowance and
+	// keeps its reset time.
+	if !reading.NextRegenAt.IsZero() && fullReset {
 		out.Groups[0].Buckets[0].ResetTime = reading.NextRegenAt.Format(time.RFC3339Nano)
 	}
 	return out
@@ -133,15 +196,12 @@ func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
 // bucket per shape, so a payload reporting weekly credits alongside legacy
 // request packs no longer hides the latter — and the panel renders one group
 // header instead of a repeated header per shape. A single-shape input renders
-// exactly as normalizeQuota renders it. The refill chip comes from the first
-// weekly shape that reports one; a non-weekly tick is kept only when no
-// weekly shape reports one, so single-shape payloads keep their chip without
-// a five-hour tick posing as the weekly refill.
+// exactly as normalizeQuota renders it. The card carries no summary chips:
+// regeneration percents are incremental hints, not plan data.
 // planWeeklyLimit and weeklyTokenLimit are the same bucket in current and
 // legacy form: when both are present only the current plan shape is rendered.
 func normalizeQuotas(readings []quotaReading) pluginapi.QuotaFetchResponse {
 	var buckets []pluginapi.QuotaBucket
-	var summary, fallback []pluginapi.QuotaMetric
 	hasPlanWeekly := false
 	for _, reading := range readings {
 		if reading.Shape == "planWeeklyLimit" && reading.PercentRemaining != nil {
@@ -157,24 +217,8 @@ func normalizeQuotas(readings []quotaReading) pluginapi.QuotaFetchResponse {
 		for _, g := range one.Groups {
 			buckets = append(buckets, g.Buckets...)
 		}
-		if len(one.Summary) == 0 {
-			continue
-		}
-		switch reading.Shape {
-		case "planWeeklyLimit", "weeklyTokenLimit":
-			if len(summary) == 0 {
-				summary = one.Summary
-			}
-		default:
-			if len(fallback) == 0 {
-				fallback = one.Summary
-			}
-		}
 	}
-	if len(summary) == 0 {
-		summary = fallback
-	}
-	out := pluginapi.QuotaFetchResponse{Summary: summary}
+	out := pluginapi.QuotaFetchResponse{}
 	if len(buckets) > 0 {
 		out.Groups = []pluginapi.QuotaGroup{{DisplayName: "Synthetic", Buckets: buckets}}
 	}
@@ -187,7 +231,14 @@ func (q *quotaProvider) HandleUsage(_ context.Context, record pluginapi.UsageRec
 		return
 	}
 	if readings, ok := quotaReadingsFromHeaders(record.ResponseHeaders); ok {
-		q.remember(quotaIdentity(record.AuthID, record.AuthIndex), readings, time.Now())
-		_ = q.cache.Store(pluginapi.QuotaFetchRequest{Provider: record.Provider, AuthID: record.AuthID, AuthIndex: record.AuthIndex}, normalizeQuotas(readings))
+		id := quotaIdentity(record.AuthID, record.AuthIndex)
+		q.remember(id, readings, time.Now(), "")
+		out := normalizeQuotas(readings)
+		// Headers carry no auth fields, so reattach the remembered plan:
+		// otherwise the plan chip vanishes until the next poll.
+		if plan := q.planFor(id); plan != "" {
+			out.Subscription = &pluginapi.QuotaSubscription{Plan: plan}
+		}
+		_ = q.cache.Store(pluginapi.QuotaFetchRequest{Provider: record.Provider, AuthID: record.AuthID, AuthIndex: record.AuthIndex}, out)
 	}
 }
