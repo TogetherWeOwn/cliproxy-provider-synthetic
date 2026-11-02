@@ -10,7 +10,7 @@ import (
 
 const (
 	provider     = "synthetic"
-	version      = "0.2.2"
+	version      = "0.2.3"
 	modelPrefix  = "synthetic/"
 	upstreamBase = "https://api.synthetic.new"
 )
@@ -30,7 +30,7 @@ func makePlugin(host kit.Caller) (*kit.Runtime, error) {
 		return nil, err
 	}
 	return kit.New(kit.Definition{
-		Metadata:       pluginapi.Metadata{Name: provider, Version: version, Author: "TogetherWeOwn", GitHubRepository: "https://github.com/TogetherWeOwn/cliproxy-provider-synthetic"},
+		Metadata:       pluginapi.Metadata{Name: provider, Version: version, Author: "TogetherWeOwn", GitHubRepository: "https://github.com/TogetherWeOwn/cliproxy-provider-synthetic", Logo: "https://www.google.com/s2/favicons?domain=synthetic.new"},
 		ModelNamespace: "synthetic",
 		Configure:      configureBase,
 		Capabilities:   pluginapi.Capabilities{AuthProvider: auth, ModelRegistrar: catalog{}, ModelProvider: catalog{}, Executor: ex, ExecutorModelScope: pluginapi.ExecutorModelScopeBoth, ExecutorInputFormats: []string{"openai"}, ExecutorOutputFormats: []string{"openai"}, QuotaProvider: quota.cache, UsagePlugin: quota, ManagementAPI: auth.Login},
