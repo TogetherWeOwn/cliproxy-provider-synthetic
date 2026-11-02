@@ -18,8 +18,11 @@ verification. See [migration](docs/MIGRATION.md).
 
 ## Auth files
 
-Create one private JSON file per API key in the CLIProxy auth directory, using
-mode `0600`. Never put real auth files in this repository.
+The provider is API-key only: there is no login card in the management UI.
+Upload one private JSON file per API key through the management UI's auth-file
+upload (the same path built-in API-key providers use), or place the file
+directly in the CLIProxy auth directory with mode `0600`. Never put real auth
+files in this repository.
 
 ```json
 {
@@ -34,27 +37,18 @@ mode `0600`. Never put real auth files in this repository.
 ```
 
 `plan` is an optional hint (`go`, `standard`, `big`), **not** proof of entitlement.
-The default/fixed ID is `synthetic:` followed by the first 12 hexadecimal digits
-of SHA-256 of the trimmed key. User-supplied `id` is rejected. Duplicate keys in
-different files are configuration errors; reparsing the same filename is safe.
-Changing a key in a file releases that file's old key. Renaming/deleting auth
-files requires a plugin lifecycle restart to clear its in-memory duplicate-file
-ownership; do not copy an existing key into another file during a rename.
+The auth ID is the file's relative path under the auth directory; a
+user-supplied `id` field is stored but ignored. Every file loads as its own
+auth, so use one file per key — the same key in two files loads twice instead
+of being rejected. Renaming, editing or deleting a file takes effect when the
+host rescans the auth directory; no plugin restart is needed.
 
 Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`, `label`
 and `disabled`. Fixed model namespace `synthetic/`; auth `prefix` does not
 replace it. Refresh preserves storage and performs no upstream request. API
-keys cannot be refreshed by this plugin.
-
-## Management-UI login
-
-The management UI's **Start Synthetic Login** card serves a kit login page that
-prompts for the API key and the optional `plan` hint, then submits them over an
-authenticated management POST (secrets travel in the POST body only, never in
-URLs, logs or process arguments). The submission runs the same ParseAuth
-validation and duplicate-key guard as an uploaded auth file, so submitting the
-same key twice is idempotent. On a remote host, set `CLIPROXY_BASE` to an
-`https://` base so both secrets are encrypted in transit.
+keys cannot be refreshed by this plugin. Uploaded files are not validated
+against the shape above at upload time (unknown `plan` values are kept, not
+rejected); the unit-tested ParseAuth in `auth.go` documents the intended shape.
 
 ## Models and execution
 
@@ -160,7 +154,7 @@ nm -D <output-dir>/synthetic.so | grep cliproxy_plugin_init
 bash scripts/package-release.sh <output-dir>
 ```
 
-The package script creates `synthetic_0.2.3_linux_amd64.zip` containing
+The package script creates `synthetic_0.2.4_linux_amd64.zip` containing
 `synthetic.so` and `LICENSE`, plus `checksums.txt` for the archive. It does not
 publish, install or reload anything. Publish both files together to a matching
 GitHub release; `registry.json` uses the native schema-v1 GitHub-release contract.

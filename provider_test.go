@@ -10,10 +10,7 @@ import (
 )
 
 func TestAuthDuplicateKeyAndReload(t *testing.T) {
-	p, err := newAuthProvider()
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := newAuthProvider()
 	ctx := context.Background()
 	parse := func(file, raw string) (pluginapi.AuthParseResponse, error) {
 		return p.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: file, RawJSON: []byte(raw)})
@@ -40,10 +37,11 @@ func TestAuthDuplicateKeyAndReload(t *testing.T) {
 			t.Fatalf("accepted %s", raw)
 		}
 	}
-	// StartLogin before the login routes are registered still fails; the
-	// wired login flow (page, submit, poll) is covered in login_test.go.
+	// API-key only: no login page is registered, so StartLogin always fails
+	// with api_key_only. Auth files load through the host's generic file
+	// path; the hostcompat test proves that path end to end.
 	if _, err = p.StartLogin(ctx, pluginapi.AuthLoginStartRequest{}); err == nil {
-		t.Fatal("login started without registered routes")
+		t.Fatal("login started for an API-key-only provider")
 	}
 	refreshed, err := p.RefreshAuth(ctx, pluginapi.AuthRefreshRequest{AuthID: a.Auth.ID, StorageJSON: a.Auth.StorageJSON, Metadata: a.Auth.Metadata})
 	if err != nil || string(refreshed.Auth.StorageJSON) != string(a.Auth.StorageJSON) {
