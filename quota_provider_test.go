@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	providerkit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -95,6 +96,35 @@ func TestQuotaHeaderPreservesPlanChip(t *testing.T) {
 	}
 	if violations := providerkit.CheckCard(result); len(violations) != 0 {
 		t.Fatalf("CheckCard violations: %v", violations)
+	}
+}
+
+// A plan edited while traffic flows must not read stale forever: once the
+// remembered plan passes its max age, header updates drop the chip instead
+// of repeating the wrong plan until a poll refreshes it.
+func TestQuotaHeaderDropsStalePlan(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"planWeeklyLimit":{"percentRemaining":25}}`))
+	}))
+	defer s.Close()
+	q := newQuotaProvider(s.URL, s.Client())
+	now := time.Now()
+	q.now = func() time.Time { return now }
+	req := pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: "edit-auth", StorageJSON: []byte(`{"api_key":"example-key","plan":"big"}`)}
+	if _, err := q.cache.FetchQuota(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(planMaxAge + time.Minute)
+	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "synthetic", AuthID: "edit-auth", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
+	result, err := q.cache.FetchQuota(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Groups[0].Buckets[0].RemainingFraction != 0.8 {
+		t.Fatalf("header did not update the bar: %+v", result)
+	}
+	if result.Subscription != nil {
+		t.Fatalf("stale plan must drop instead of repeating: %+v", result.Subscription)
 	}
 }
 func TestQuotaUsageRejectsForeignProvider(t *testing.T) {

@@ -15,7 +15,16 @@ type quotaProvider struct {
 	cache    *providerkit.CachedQuota
 	mu       sync.Mutex
 	readings map[string]timedReading
+	now      func() time.Time
 }
+
+// planMaxAge bounds how long a header update may repeat a remembered plan.
+// Headers carry no auth fields, so a plan edited mid-traffic would otherwise
+// read stale until a traffic gap lets a poll through; after this age the
+// chip drops instead of risking the wrong plan. Polls always reattach the
+// current plan.
+const planMaxAge = 10 * time.Minute
+
 type timedReading struct {
 	readings   []quotaReading
 	observedAt time.Time
@@ -24,6 +33,16 @@ type timedReading struct {
 	// a header update (which carries no auth fields) keeps the plan chip
 	// instead of wiping it until the next poll.
 	plan string
+	// planAt is when that plan was last reported by a poll; header-only
+	// remembers never move it.
+	planAt time.Time
+}
+
+func (q *quotaProvider) clock() time.Time {
+	if q != nil && q.now != nil {
+		return q.now()
+	}
+	return time.Now()
 }
 
 // These observations are response-classification hints only. They never select
@@ -34,7 +53,7 @@ func (q *quotaProvider) remember(id string, readings []quotaReading, observedAt 
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	now := time.Now()
+	now := q.clock()
 	if q.readings == nil {
 		q.readings = make(map[string]timedReading)
 	}
@@ -48,19 +67,21 @@ func (q *quotaProvider) remember(id string, readings []quotaReading, observedAt 
 	}
 	kept := make([]quotaReading, len(readings))
 	copy(kept, readings)
-	next := timedReading{readings: kept, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL), plan: plan}
-	if plan == "" {
+	next := timedReading{readings: kept, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
+	if plan != "" {
+		next.plan, next.planAt = plan, observedAt
+	} else if current, ok := q.readings[id]; ok {
 		// A poll without a plan field (or a header, which never carries
 		// one) must not wipe a plan a previous poll remembered.
-		if current, ok := q.readings[id]; ok {
-			next.plan = current.plan
-		}
+		next.plan, next.planAt = current.plan, current.planAt
 	}
 	q.readings[id] = next
 }
 
 // planFor returns the remembered display-only plan for an auth, or "" when
-// none was reported or the observation expired.
+// none was reported, the observation expired, or the plan itself is older
+// than planMaxAge (an edited plan then drops the chip instead of showing the
+// wrong one until a poll refreshes it).
 func (q *quotaProvider) planFor(id string) string {
 	if q == nil || id == "" {
 		return ""
@@ -68,8 +89,11 @@ func (q *quotaProvider) planFor(id string) string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	r, ok := q.readings[id]
-	if !ok || !time.Now().Before(r.expires) {
+	if !ok || !q.clock().Before(r.expires) {
 		delete(q.readings, id)
+		return ""
+	}
+	if r.plan == "" || r.planAt.IsZero() || q.clock().Sub(r.planAt) >= planMaxAge {
 		return ""
 	}
 	return r.plan
