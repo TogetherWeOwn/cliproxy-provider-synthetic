@@ -10,7 +10,7 @@ import (
 
 const (
 	provider     = "synthetic"
-	version      = "0.2.1"
+	version      = "0.2.2"
 	modelPrefix  = "synthetic/"
 	upstreamBase = "https://api.synthetic.new"
 )
