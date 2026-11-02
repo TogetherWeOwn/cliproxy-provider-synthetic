@@ -177,7 +177,11 @@ func normalizeQuota(reading quotaReading) pluginapi.QuotaFetchResponse {
 	case "rollingFiveHourLimit":
 		window = providerkit.CardWindowFiveHour
 	case "subscription":
-		window = "Subscription"
+		// "Subscription" truncates to "Subscri…" beside a full reset
+		// timestamp, and it matches no window the panel recognises, so
+		// the panel prints the raw label. "Renewal" stays untruncated
+		// and names the honest countdown: a real renewal, not a refill.
+		window = "Renewal"
 		fullReset = true
 	}
 	bucket := pluginapi.QuotaBucket{Window: window, RemainingFraction: percent / 100}

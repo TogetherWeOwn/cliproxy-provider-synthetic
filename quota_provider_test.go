@@ -195,10 +195,10 @@ func TestMultiShapeQuotaEmitsOneBucketPerShape(t *testing.T) {
 	if resets["weekly"] != "" {
 		t.Fatalf("incremental refill shown as reset: %+v", got)
 	}
-	if resets["Subscription"] == "" {
+	if resets["Renewal"] == "" {
 		t.Fatalf("renewal lost its reset time: %+v", got)
 	}
-	if windows["weekly"] != 0.25 || windows[providerkit.CardWindowFiveHour] != 0.5 || windows["Subscription"] != 0.6 {
+	if windows["weekly"] != 0.25 || windows[providerkit.CardWindowFiveHour] != 0.5 || windows["Renewal"] != 0.6 {
 		t.Fatalf("wrong per-shape fractions: %+v", got)
 	}
 	// None of these shapes regenerates, so no refill chip is emitted.
@@ -215,6 +215,35 @@ func TestMultiShapeQuotaEmitsOneBucketPerShape(t *testing.T) {
 	}
 	if multi := normalizeQuotas([]quotaReading{single}); len(multi.Groups) != 1 || multi.Groups[0].DisplayName != "Synthetic" {
 		t.Fatalf("single-shape output changed: %+v", multi)
+	}
+}
+
+// The legacy subscription row must render untruncated beside its renewal
+// timestamp: "Subscription" was cut to "Subscri…" on staging, and it matches
+// no window the panel recognises. The short "Renewal" label keeps the
+// genuine renewal reset time, while weekly and five-hour rows keep no reset
+// time (their nextRegenAt is an incremental refill, not a reset).
+func TestSubscriptionRowKeepsShortRenewalLabel(t *testing.T) {
+	renewAt := time.Date(2030, 2, 1, 0, 0, 0, 0, time.UTC)
+	got := normalizeQuota(quotaReading{Shape: "subscription", PercentRemaining: floatPtr(60), NextRegenAt: renewAt})
+	if len(got.Groups) != 1 || len(got.Groups[0].Buckets) != 1 {
+		t.Fatalf("subscription must render one bucket: %+v", got)
+	}
+	bucket := got.Groups[0].Buckets[0]
+	if bucket.Window != "Renewal" {
+		t.Fatalf("subscription label = %q, want %q: %+v", bucket.Window, "Renewal", got)
+	}
+	if len(bucket.Window) > 8 {
+		t.Fatalf("subscription label %q is too long to render beside its reset time", bucket.Window)
+	}
+	if bucket.Description != "" {
+		t.Fatalf("subscription bucket carries description text: %+v", bucket)
+	}
+	if bucket.ResetTime == "" {
+		t.Fatalf("renewal lost its reset time: %+v", got)
+	}
+	if violations := providerkit.CheckCard(got); len(violations) != 0 {
+		t.Fatalf("CheckCard violations: %v", violations)
 	}
 }
 
