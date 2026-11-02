@@ -145,21 +145,34 @@ func TestRealHostLoader(t *testing.T) {
 	defer cancel()
 	ctx = logging.WithResponseHeadersHolder(ctx)
 	host.ApplyConfig(ctx, cfg)
-	if !host.PluginLoaded("synthetic") || !host.PluginRegistered("synthetic") || !host.HasAuthProvider("synthetic") || !host.HasQuotaProvider("synthetic") {
+	// API-key only (TWO-1257): the plugin registers no AuthProvider, so the
+	// management UI shows no login card.
+	if !host.PluginLoaded("synthetic") || !host.PluginRegistered("synthetic") || host.HasAuthProvider("synthetic") || !host.HasQuotaProvider("synthetic") {
 		t.Fatalf("registration %+v", host.RegisteredPlugins())
 	}
 	info := host.RegisteredPlugins()
-	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.3" {
+	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.4" {
 		t.Fatalf("metadata %+v", info)
 	}
+	// Without an AuthProvider the host leaves the parse unhandled and the auth
+	// file loads through the generic file path instead.
 	auth, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "example.json", RawJSON: []byte(`{"type":"synthetic","api_key":"example-key","label":"Example"}`)})
-	if err != nil || !handled || auth == nil {
-		t.Fatalf("auth %v %v", handled, err)
+	if err != nil || handled || auth != nil {
+		t.Fatalf("plugin auth unexpectedly handled %v %v", handled, err)
 	}
-	if _, _, err = host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "duplicate.json", RawJSON: []byte(`{"type":"synthetic","api_key":"example-key"}`)}); err == nil {
-		t.Fatal("duplicate key accepted by real host parser")
+	fileRaw := []byte(`{"type":"synthetic","api_key":"example-key","label":"Example"}`)
+	var metadata map[string]any
+	if json.Unmarshal(fileRaw, &metadata) != nil {
+		t.Fatal("invalid fixture JSON")
 	}
 	file := filepath.Join(cfg.AuthDir, "example.json")
+	if err = os.WriteFile(file, fileRaw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	auth = host.AuthDataToCoreAuth(pluginapi.AuthData{Provider: "synthetic", FileName: "example.json", Label: "Example", StorageJSON: fileRaw, Metadata: metadata}, file, "example.json")
+	if auth == nil {
+		t.Fatal("generic file auth did not convert")
+	}
 	if err = auth.Storage.SaveTokenToFile(file); err != nil {
 		t.Fatal(err)
 	}
@@ -280,9 +293,14 @@ func TestRealHostLoader(t *testing.T) {
 		}
 	}
 	t.Run("native payment failover isolates the failing auth", func(t *testing.T) {
-		second, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "second.json", RawJSON: []byte(`{"type":"synthetic","api_key":"second-key"}`)})
-		if err != nil || !handled || second == nil {
-			t.Fatalf("second auth %v", err)
+		secondRaw := []byte(`{"type":"synthetic","api_key":"second-key"}`)
+		var secondMeta map[string]any
+		if json.Unmarshal(secondRaw, &secondMeta) != nil {
+			t.Fatal("invalid fixture JSON")
+		}
+		second := host.AuthDataToCoreAuth(pluginapi.AuthData{Provider: "synthetic", FileName: "second.json", StorageJSON: secondRaw, Metadata: secondMeta}, filepath.Join(cfg.AuthDir, "second.json"), "second.json")
+		if second == nil {
+			t.Fatal("generic second auth did not convert")
 		}
 		mgr := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
 		mgr.SetRetryConfig(0, 0, 2)
@@ -350,7 +368,7 @@ func TestRegistryUsesNativeStoreSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg, err := pluginstore.ParseRegistry(raw)
-	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "synthetic" || reg.Plugins[0].Version != "0.2.3" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
+	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "synthetic" || reg.Plugins[0].Version != "0.2.4" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
 		t.Fatalf("registry %+v %v", reg, err)
 	}
 }
