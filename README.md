@@ -28,7 +28,6 @@ files in this repository.
 {
   "type": "synthetic",
   "api_key": "<synthetic-api-key>",
-  "label": "<account-label>",
   "plan": "big",
   "weight": 1,
   "priority": 0,
@@ -41,10 +40,13 @@ The auth ID is the file's relative path under the auth directory; a
 user-supplied `id` field is stored but ignored. Every file loads as its own
 auth, so use one file per key — the same key in two files loads twice instead
 of being rejected. Renaming, editing or deleting a file takes effect when the
-host rescans the auth directory; no plugin restart is needed.
+host rescans the auth directory; no plugin restart is needed. Quota is
+display-only and cached per auth for 60 seconds, so editing a key in place can
+keep showing the previous key's reading until the cache expires.
 
-Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`, `label`
-and `disabled`. Fixed model namespace `synthetic/`; auth `prefix` does not
+Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`
+and `disabled`. The management UI derives the display label from the file
+itself; a file-level `label` is ignored on the generic file path. Fixed model namespace `synthetic/`; auth `prefix` does not
 replace it. Refresh preserves storage and performs no upstream request. API
 keys cannot be refreshed by this plugin. Uploaded files are not validated
 against the shape above at upload time (unknown `plan` values are kept, not
