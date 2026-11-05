@@ -76,6 +76,8 @@ func (q *quotaProvider) remember(key readingKey, readings []quotaReading, observ
 	q.readings[key] = timedReading{readings: kept, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
 }
 
+func (q *quotaProvider) Identifier() string { return q.cache.Identifier() }
+
 func (q *quotaProvider) DescribeQuota(ctx context.Context, req pluginapi.QuotaDescribeRequest) (pluginapi.QuotaDescribeResponse, error) {
 	return q.cache.DescribeQuota(ctx, req)
 }
