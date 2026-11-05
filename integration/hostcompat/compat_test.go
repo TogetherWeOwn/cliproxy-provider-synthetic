@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexec "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -378,15 +379,22 @@ func TestRealHostLoader(t *testing.T) {
 		t.Log("v8.0.49 RPC drops the transient marker and marks concurrency 429 as model quota exceeded")
 	})
 	t.Run("pinned prefix routes and strips end to end", func(t *testing.T) {
-		// API-key auth uses the generic file path, not the plugin parser.
+		// Load the raw file through the host's generic path so the host, not
+		// this fixture, normalizes the routing prefix and retains raw metadata.
 		raw := []byte(`{"type":"synthetic","api_key":"pinned-key","prefix":" /acct/ "}`)
-		var metadata map[string]any
-		if err := json.Unmarshal(raw, &metadata); err != nil {
+		authDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(authDir, "pinned.json"), raw, 0600); err != nil {
 			t.Fatal(err)
 		}
-		pinned := host.AuthDataToCoreAuth(pluginapi.AuthData{Provider: "synthetic", FileName: "pinned.json", Prefix: "acct", StorageJSON: raw, Metadata: metadata}, filepath.Join(cfg.AuthDir, "pinned.json"), "pinned.json")
-		if pinned == nil || pinned.Prefix != "acct" {
-			t.Fatalf("host did not round-trip the auth prefix: %+v", pinned)
+		store := sdkauth.NewFileTokenStore()
+		store.SetBaseDir(authDir)
+		loaded, err := store.List(ctx)
+		if err != nil || len(loaded) != 1 {
+			t.Fatalf("generic auth file load: count=%d err=%v", len(loaded), err)
+		}
+		pinned := loaded[0]
+		if pinned == nil || pinned.Provider != "synthetic" || pinned.Prefix != "acct" || pinned.Metadata["prefix"] != " /acct/ " {
+			t.Fatal("generic loader did not normalize the routing prefix and retain raw metadata")
 		}
 		mgr := coreauth.NewManager(nil, nil, nil)
 		mgr.SetRetryConfig(0, 0, 1)
