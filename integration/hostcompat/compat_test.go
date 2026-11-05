@@ -47,7 +47,7 @@ func TestRealHostLoader(t *testing.T) {
 	var polls atomic.Int32
 	gate := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer example-key" && r.Header.Get("Authorization") != "Bearer second-key" {
+		if r.Header.Get("Authorization") != "Bearer example-key" && r.Header.Get("Authorization") != "Bearer second-key" && r.Header.Get("Authorization") != "Bearer pinned-key" {
 			t.Error("incorrect authorization")
 		}
 		switch r.URL.Path {
@@ -359,6 +359,52 @@ func TestRealHostLoader(t *testing.T) {
 			t.Fatalf("pinned host behavior changed; revisit documented RPC limitation: %+v", state)
 		}
 		t.Log("v8.0.49 RPC drops the transient marker and marks concurrency 429 as model quota exceeded")
+	})
+	t.Run("pinned prefix routes and strips end to end", func(t *testing.T) {
+		// API-key auth uses the generic file path, not the plugin parser.
+		raw := []byte(`{"type":"synthetic","api_key":"pinned-key","prefix":"acct"}`)
+		var metadata map[string]any
+		if err := json.Unmarshal(raw, &metadata); err != nil {
+			t.Fatal(err)
+		}
+		pinned := host.AuthDataToCoreAuth(pluginapi.AuthData{Provider: "synthetic", FileName: "pinned.json", Prefix: "acct", StorageJSON: raw, Metadata: metadata}, filepath.Join(cfg.AuthDir, "pinned.json"), "pinned.json")
+		if pinned == nil || pinned.Prefix != "acct" {
+			t.Fatalf("host did not round-trip the auth prefix: %+v", pinned)
+		}
+		mgr := coreauth.NewManager(nil, nil, nil)
+		mgr.SetRetryConfig(0, 0, 1)
+		mgr.RegisterExecutor(ex)
+		one := pinned.Clone()
+		one.ID = "pinned-auth"
+		one.Status = coreauth.StatusActive
+		if _, err := mgr.Register(ctx, one); err != nil {
+			t.Fatal(err)
+		}
+		model := "acct/synthetic/syn:small:text"
+		registry.GetGlobalRegistry().RegisterClient(one.ID, one.Provider, []*registry.ModelInfo{{ID: "synthetic/syn:small:text"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(one.ID) })
+		// The connector addresses the pinned member by its pinned id, so the
+		// payload model carries the host prefix while the route model is
+		// already prefix-stripped for upstream dispatch. The mock upstream
+		// above rejects anything but the bare id.
+		resp, err := mgr.Execute(ctx, []string{"synthetic"}, coreexec.Request{Model: model, Payload: []byte(`{"model":"acct/synthetic/syn:small:text","messages":[{"role":"user","content":"hello"}]}`), Format: translator.FormatOpenAI}, opts)
+		if err != nil || !strings.Contains(string(resp.Payload), `"content":"hello"`) {
+			t.Fatalf("pinned execute %s %v", resp.Payload, err)
+		}
+	})
+	t.Run("prefixed files remain unhandled by plugin parser", func(t *testing.T) {
+		// ParseAuth's unit-tested validation is documentation only: the
+		// production plugin must not reintroduce an AuthProvider login card.
+		for _, prefix := range []string{"acct", "trail/", "a/b"} {
+			raw, err := json.Marshal(map[string]any{"type": "synthetic", "api_key": "example-key", "prefix": prefix})
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "prefixed.json", RawJSON: raw})
+			if err != nil || handled || parsed != nil {
+				t.Fatalf("prefixed file unexpectedly handled: %q %v %v", prefix, handled, err)
+			}
+		}
 	})
 }
 

@@ -153,6 +153,29 @@ func TestLegacyQuotaDoesNotClaimWeeklyCredits(t *testing.T) {
 	}
 }
 
+func TestSubscriptionSummaryReportsAbsoluteCounters(t *testing.T) {
+	r, err := parseQuota([]byte(`{"subscription":{"limit":135,"requests":27,"renewsAt":"2025-09-21T14:36:14.288Z"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := normalizeQuota(r)
+	if len(got.Groups) != 1 || got.Groups[0].Buckets[0].Window != "Renewal" || got.Groups[0].Buckets[0].RemainingFraction != 0.8 {
+		t.Fatalf("subscription bucket wrong: %+v", got)
+	}
+	used, limit := -1.0, -1.0
+	for _, metric := range got.Summary {
+		switch metric.Key {
+		case "subscription_requests_used":
+			used = metric.Value
+		case "subscription_request_limit":
+			limit = metric.Value
+		}
+	}
+	if used != 27 || limit != 135 {
+		t.Fatalf("subscription absolutes missing from Summary: %+v", got.Summary)
+	}
+}
+
 func TestNormalizeQuotaMissingRemainingDoesNotInventQuota(t *testing.T) {
 	got := normalizeQuota(quotaReading{Shape: "planWeeklyLimit"})
 	if len(got.Groups) != 0 || len(got.Summary) != 0 {
@@ -201,9 +224,10 @@ func TestMultiShapeQuotaEmitsOneBucketPerShape(t *testing.T) {
 	if windows["weekly"] != 0.25 || windows[providerkit.CardWindowFiveHour] != 0.5 || windows["Renewal"] != 0.6 {
 		t.Fatalf("wrong per-shape fractions: %+v", got)
 	}
-	// None of these shapes regenerates, so no refill chip is emitted.
-	if len(got.Summary) != 0 {
-		t.Fatalf("unexpected summary: %+v", got)
+	// Only the subscription's absolute counters become summary metrics;
+	// weekly and five-hour regeneration never emits a refill chip.
+	if len(got.Summary) != 2 || got.Summary[0].Key != "subscription_requests_used" || got.Summary[0].Value != 40 || got.Summary[1].Key != "subscription_request_limit" || got.Summary[1].Value != 100 {
+		t.Fatalf("subscription counters lost in multi-shape output: %+v", got)
 	}
 	if violations := providerkit.CheckCard(got); len(violations) != 0 {
 		t.Fatalf("CheckCard violations: %v", violations)
