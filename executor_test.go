@@ -147,6 +147,73 @@ func TestExecutorInfiniteAggregatesSSEAndOrdinaryNonstreamUntouched(t *testing.T
 	}
 }
 
+func TestExecutorNamespaceMatchingAuthPrefix(t *testing.T) {
+	for _, prefix := range []string{"synthetic", " /synthetic/ "} {
+		for _, pinned := range []bool{false, true} {
+			for _, model := range []string{"syn:small:text", "infinite:small:vision"} {
+				for _, method := range []string{"execute", "stream", "http"} {
+					t.Run(fmt.Sprintf("prefix=%q/pinned=%t/%s/%s", prefix, pinned, model, method), func(t *testing.T) {
+						wantStream := method == "stream" || strings.HasPrefix(model, "infinite:")
+						server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							var body map[string]any
+							if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+								t.Error(err)
+							}
+							if body["model"] != model || (body["stream"] == true) != wantStream {
+								t.Errorf("upstream model/stream = %v/%v, want %s/%t", body["model"], body["stream"], model, wantStream)
+							}
+							if wantStream {
+								w.Header().Set("Content-Type", "text/event-stream")
+								io.WriteString(w, infiniteSSE)
+							} else {
+								w.Header().Set("Content-Type", "application/json")
+								io.WriteString(w, `{"choices":[{"message":{"content":"hello"}}]}`)
+							}
+						}))
+						defer server.Close()
+						payloadModel := modelPrefix + model
+						if pinned {
+							payloadModel = "synthetic/" + payloadModel
+						}
+						payload, _ := json.Marshal(map[string]any{"model": payloadModel})
+						r := pluginapi.ExecutorRequest{Payload: payload, StorageJSON: []byte(`{"api_key":"example-key"}`), AuthMetadata: map[string]any{"prefix": prefix}, HTTPClient: mockHostClient{server}}
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						ex := newExecutor(nil)
+						var response []byte
+						switch method {
+						case "execute":
+							out, err := ex.Execute(ctx, r)
+							if err != nil {
+								t.Fatal(err)
+							}
+							response = out.Payload
+						case "http":
+							out, err := ex.HttpRequest(ctx, pluginapi.ExecutorHTTPRequest{Body: payload, StorageJSON: r.StorageJSON, Metadata: r.AuthMetadata, HTTPClient: r.HTTPClient})
+							if err != nil || out.StatusCode != http.StatusOK {
+								t.Fatalf("raw HTTP status=%d err=%v", out.StatusCode, err)
+							}
+							response = out.Body
+						case "stream":
+							out, err := ex.ExecuteStream(ctx, r)
+							if err != nil {
+								t.Fatal(err)
+							}
+							response, err = aggregateSSE(ctx, out.Chunks)
+							if err != nil {
+								t.Fatal(err)
+							}
+						}
+						if !json.Valid(response) || !bytes.Contains(response, []byte(`"content":"hello"`)) {
+							t.Fatalf("expected JSON completion, got %s", response)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
 func TestInfiniteRejectsMalformedTruncatedAndCanceledStream(t *testing.T) {
 	// Channel close is the terminal marker (the kit drops [DONE] before these
 	// chunks reach the plugin), so a stream cut after complete events is

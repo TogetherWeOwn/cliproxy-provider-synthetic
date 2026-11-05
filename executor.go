@@ -46,7 +46,12 @@ func stripHostPrefix(model string, meta map[string]any) string {
 	if prefix = strings.Trim(strings.TrimSpace(prefix), "/"); prefix == "" || strings.Contains(prefix, "/") {
 		return model
 	}
-	return strings.TrimPrefix(model, prefix+"/")
+	// A prefix may itself be "synthetic". Strip it only when a provider
+	// namespace follows, leaving already-normalized models intact.
+	if strings.HasPrefix(model, prefix+"/"+modelPrefix) {
+		return strings.TrimPrefix(model, prefix+"/")
+	}
+	return model
 }
 
 func (e executor) Execute(ctx context.Context, r pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {

@@ -116,6 +116,14 @@ func TestBuildRequestStripsPinnedHostPrefix(t *testing.T) {
 		{"outer slashes and whitespace", "acct/synthetic/syn:small:text", map[string]any{"prefix": " /acct// "}, "syn:small:text", false},
 		{"padded infinite forces stream", "acct/synthetic/infinite:small:vision", map[string]any{"prefix": "/acct/"}, "infinite:small:vision", true},
 		{"empty normalized prefix leaves model alone", "synthetic/syn:small:text", map[string]any{"prefix": " /// "}, "syn:small:text", false},
+		{"namespace prefix normalized chat", "synthetic/syn:small:text", map[string]any{"prefix": "synthetic"}, "syn:small:text", false},
+		{"namespace prefix pinned chat", "synthetic/synthetic/syn:small:text", map[string]any{"prefix": "synthetic"}, "syn:small:text", false},
+		{"namespace prefix normalized infinite", "synthetic/infinite:small:vision", map[string]any{"prefix": "synthetic"}, "infinite:small:vision", true},
+		{"namespace prefix pinned infinite", "synthetic/synthetic/infinite:small:vision", map[string]any{"prefix": "synthetic"}, "infinite:small:vision", true},
+		{"padded namespace prefix normalized chat", "synthetic/syn:small:text", map[string]any{"prefix": " /synthetic/ "}, "syn:small:text", false},
+		{"padded namespace prefix pinned chat", "synthetic/synthetic/syn:small:text", map[string]any{"prefix": " /synthetic/ "}, "syn:small:text", false},
+		{"padded namespace prefix normalized infinite", "synthetic/infinite:small:vision", map[string]any{"prefix": " /synthetic/ "}, "infinite:small:vision", true},
+		{"padded namespace prefix pinned infinite", "synthetic/synthetic/infinite:small:vision", map[string]any{"prefix": " /synthetic/ "}, "infinite:small:vision", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload, _ := json.Marshal(map[string]any{"model": tc.model, "messages": []any{}})
