@@ -33,7 +33,7 @@ func makePlugin(host kit.Caller) (*kit.Runtime, error) {
 		Metadata:       pluginapi.Metadata{Name: displayName, Version: version, Author: "TogetherWeOwn", GitHubRepository: "https://github.com/TogetherWeOwn/cliproxy-provider-synthetic", Logo: "https://www.google.com/s2/favicons?domain=synthetic.new"},
 		ModelNamespace: "synthetic",
 		Configure:      configureBase,
-		Capabilities:   pluginapi.Capabilities{ModelRegistrar: catalog{}, ModelProvider: catalog{}, Executor: ex, ExecutorModelScope: pluginapi.ExecutorModelScopeBoth, ExecutorInputFormats: []string{"openai"}, ExecutorOutputFormats: []string{"openai"}, QuotaProvider: quota.cache, UsagePlugin: quota},
+		Capabilities:   pluginapi.Capabilities{ModelRegistrar: catalog{}, ModelProvider: catalog{}, Executor: ex, ExecutorModelScope: pluginapi.ExecutorModelScopeBoth, ExecutorInputFormats: []string{"openai"}, ExecutorOutputFormats: []string{"openai"}, QuotaProvider: quota, UsagePlugin: quota},
 		OnShutdown:     func(context.Context) error { client.CloseIdleConnections(); return nil },
 	}, host)
 }

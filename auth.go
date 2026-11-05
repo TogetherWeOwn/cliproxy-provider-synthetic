@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 
 	kit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -15,12 +14,11 @@ import (
 // The provider is API-key only: it registers no AuthProvider, so the
 // management UI shows no login card and auth files load through the host's
 // generic file path. ParseAuth stays as the documented auth-file
-// validation (plan shape, duplicate-key guard) beside the JSON shape in the
-// README; re-register it as the plugin AuthProvider to restore upload-time
-// validation.
+// validation beside the JSON shape in the README. Its claims do not validate
+// installed host auths or reserve their prefixes.
 type authProvider struct {
 	kit.APIKeyAuth
-	guard kit.KeyOwnership
+	claims kit.PrefixClaims
 }
 
 func newAuthProvider() *authProvider {
@@ -44,8 +42,7 @@ func (p *authProvider) ParseAuth(ctx context.Context, r pluginapi.AuthParseReque
 	if err != nil {
 		return pluginapi.AuthParseResponse{}, err
 	}
-	digest := sha256.Sum256([]byte(key))
-	if err := p.guard.Claim(ctx, r.FileName, digest); err != nil {
+	if err := p.claims.Claim(r.FileName, out.Auth.Prefix, []byte(key)); err != nil {
 		return pluginapi.AuthParseResponse{}, err
 	}
 	return out, nil

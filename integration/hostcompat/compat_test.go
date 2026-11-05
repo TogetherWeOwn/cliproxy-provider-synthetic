@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexec "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -47,7 +48,7 @@ func TestRealHostLoader(t *testing.T) {
 	var polls atomic.Int32
 	gate := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer example-key" && r.Header.Get("Authorization") != "Bearer second-key" {
+		if r.Header.Get("Authorization") != "Bearer example-key" && r.Header.Get("Authorization") != "Bearer second-key" && r.Header.Get("Authorization") != "Bearer pinned-key" {
 			t.Error("incorrect authorization")
 		}
 		switch r.URL.Path {
@@ -235,6 +236,23 @@ func TestRealHostLoader(t *testing.T) {
 	if polls.Load() != 1 {
 		t.Fatal("header update triggered a quota poll")
 	}
+	t.Run("header quota uses current auth plan", func(t *testing.T) {
+		current := quotaReq
+		for _, plan := range []string{"big", "go", ""} {
+			current.StorageJSON, _ = json.Marshal(map[string]any{"api_key": "rotated-key", "plan": plan})
+			out, handled, err := host.FetchQuota(ctx, current)
+			if err != nil || !handled || len(out.Groups) != 1 || out.Groups[0].Buckets[0].RemainingFraction != .88 || polls.Load() != 1 {
+				t.Fatalf("cached header quota %+v %v %v polls=%d", out, handled, err, polls.Load())
+			}
+			got := ""
+			if out.Subscription != nil {
+				got = out.Subscription.Plan
+			}
+			if got != plan {
+				t.Fatalf("plan = %q, want current auth plan %q", got, plan)
+			}
+		}
+	})
 	infinite := coreexec.Request{Model: "synthetic/infinite:small:vision", Payload: []byte(`{"model":"synthetic/infinite:small:vision","messages":[{"role":"user","content":"hello"}]}`), Format: translator.FormatOpenAI}
 	resp, err = ex.Execute(ctx, auth, infinite, opts)
 	if err != nil || !strings.Contains(string(resp.Payload), `"object":"chat.completion"`) || !strings.Contains(string(resp.Payload), `"content":"hello"`) || !strings.Contains(string(resp.Payload), `"total_tokens":5`) {
@@ -359,6 +377,70 @@ func TestRealHostLoader(t *testing.T) {
 			t.Fatalf("pinned host behavior changed; revisit documented RPC limitation: %+v", state)
 		}
 		t.Log("v8.0.49 RPC drops the transient marker and marks concurrency 429 as model quota exceeded")
+	})
+	for _, prefix := range []string{" /acct/ ", "synthetic", " /synthetic/ "} {
+		t.Run("pinned prefix routes and strips end to end/"+prefix, func(t *testing.T) {
+			// Load the raw file through the host's generic path so the host, not
+			// this fixture, normalizes the routing prefix and retains raw metadata.
+			raw, err := json.Marshal(map[string]any{"type": "synthetic", "api_key": "pinned-key", "prefix": prefix})
+			if err != nil {
+				t.Fatal(err)
+			}
+			authDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(authDir, "pinned.json"), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			store := sdkauth.NewFileTokenStore()
+			store.SetBaseDir(authDir)
+			loaded, err := store.List(ctx)
+			if err != nil || len(loaded) != 1 {
+				t.Fatalf("generic auth file load: count=%d err=%v", len(loaded), err)
+			}
+			pinned := loaded[0]
+			if pinned == nil || pinned.Provider != "synthetic" || pinned.Prefix != strings.Trim(strings.TrimSpace(prefix), "/") || pinned.Metadata["prefix"] != prefix {
+				t.Fatal("generic loader did not normalize the routing prefix and retain raw metadata")
+			}
+			mgr := coreauth.NewManager(nil, nil, nil)
+			mgr.SetRetryConfig(0, 0, 1)
+			mgr.RegisterExecutor(ex)
+			one := pinned.Clone()
+			one.ID = "pinned-auth"
+			one.Status = coreauth.StatusActive
+			if _, err := mgr.Register(ctx, one); err != nil {
+				t.Fatal(err)
+			}
+			registry.GetGlobalRegistry().RegisterClient(one.ID, one.Provider, []*registry.ModelInfo{{ID: "synthetic/syn:small:text"}, {ID: "synthetic/infinite:small:vision"}})
+			defer registry.GetGlobalRegistry().UnregisterClient(one.ID)
+			// The connector addresses the pinned member by its pinned id, so the
+			// payload model carries the host prefix while the route model is
+			// already prefix-stripped for upstream dispatch. The mock upstream
+			// above rejects anything but the bare id.
+			for _, id := range []string{"synthetic/syn:small:text", "synthetic/infinite:small:vision"} {
+				model := pinned.Prefix + "/" + id
+				payload, err := json.Marshal(map[string]any{"model": model, "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err := mgr.Execute(ctx, []string{"synthetic"}, coreexec.Request{Model: model, Payload: payload, Format: translator.FormatOpenAI}, opts)
+				if err != nil || !json.Valid(resp.Payload) || !strings.Contains(string(resp.Payload), `"content":"hello"`) {
+					t.Fatalf("pinned execute %s: %s %v", model, resp.Payload, err)
+				}
+			}
+		})
+	}
+	t.Run("prefixed files remain unhandled by plugin parser", func(t *testing.T) {
+		// ParseAuth's unit-tested validation is documentation only: the
+		// production plugin must not reintroduce an AuthProvider login card.
+		for _, prefix := range []string{"acct", "trail/", "a/b"} {
+			raw, err := json.Marshal(map[string]any{"type": "synthetic", "api_key": "example-key", "prefix": prefix})
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, handled, err := host.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: "synthetic", FileName: "prefixed.json", RawJSON: raw})
+			if err != nil || handled || parsed != nil {
+				t.Fatalf("prefixed file unexpectedly handled: %q %v %v", prefix, handled, err)
+			}
+		}
 	})
 }
 

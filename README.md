@@ -41,8 +41,10 @@ user-supplied `id` field is stored but ignored. Every file loads as its own
 auth, so use one file per key — the same key in two files loads twice instead
 of being rejected. Renaming, editing or deleting a file takes effect when the
 host rescans the auth directory; no plugin restart is needed. Quota is
-display-only and cached per auth for 60 seconds, so editing a key in place can
-keep showing the previous key's reading until the cache expires.
+display-only and cached for 60 seconds. Polled readings and classification
+hints are bound to the credential generation: editing a key in place does not
+reuse the old key's polled evidence. Header observations carry no credential
+context and remain available to every generation for their TTL.
 
 Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`
 and `disabled`. The management UI derives the display label from the file
@@ -55,7 +57,10 @@ rejected); the unit-tested ParseAuth in `auth.go` documents the intended shape.
 ## Models and execution
 
 Every registered/discovered chat model has the fixed `synthetic/` prefix.
-Only that leading namespace is stripped before the upstream request. Discovery
+When per-credential pinning leaves a host prefix in the payload, one leading
+`<prefix>/` segment matching the credential metadata is stripped first. The
+`synthetic/` namespace is then stripped before the upstream request. A wrong
+host prefix is still rejected; this does not change account selection. Discovery
 sends Bearer auth to `/openai/v1/models`; the static registrar supplies stable
 aliases if discovery is unavailable. Embedding models are outside v1's scope.
 Discovery does not assume that a `plan` hint grants access to any model.
@@ -101,13 +106,16 @@ Every shape the quota payload reports gets one bucket in a single `Synthetic`
 group: weekly (`planWeeklyLimit`, `weeklyTokenLimit`) as `weekly`, rolling
 five-hour (`rollingFiveHourLimit`) as `5h`, and legacy `subscription` as
 `Renewal` (short enough to render beside its renewal timestamp).
-Buckets carry the window id only, with no description, and the
-card carries no summary chips: regeneration percents are incremental hints,
-not plan data. A regeneration timestamp is the **next increment, not a full
+Buckets carry the window id only, with no description. The legacy
+`subscription` shape also exposes `subscription_requests_used` and
+`subscription_request_limit` as absolute Summary counters so callers can
+derive utilization. Regeneration percents are incremental hints, not plan
+data, and never become refill chips. A regeneration timestamp is the **next increment, not a full
 reset**, so it is never shown for weekly ticks — only `subscription`
 renewals reset the allowance and keep their reset time. The optional auth
-`plan` field (go, standard or big) surfaces as the plan chip; header updates
-carry no auth fields but keep the remembered plan. Legacy
+`plan` field (go, standard or big) surfaces as the plan chip. Each quota fetch
+attaches the current auth fields after reading cached quota data, so header
+updates cannot repeat a previous plan after an edit or key rotation. Legacy
 five-hour/subscription buckets appear only if those shapes are actually
 returned. No numeric plan allowance is hard-coded. Quota reset is unsupported;
 a web-UI reset entitlement is not an API.

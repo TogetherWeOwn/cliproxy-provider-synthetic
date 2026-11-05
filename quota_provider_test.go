@@ -23,7 +23,7 @@ func TestQuotaProviderPollAndHeader(t *testing.T) {
 	defer s.Close()
 	q := newQuotaProvider(s.URL+"/v2/quotas", s.Client())
 	req := pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: "a", StorageJSON: []byte(`{"api_key":"example-key"}`)}
-	result, err := q.cache.FetchQuota(context.Background(), req)
+	result, err := q.FetchQuota(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestQuotaProviderPollAndHeader(t *testing.T) {
 		t.Fatalf("unexpected quota result: %+v", result)
 	}
 	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "synthetic", AuthID: "a", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
-	result, err = q.cache.FetchQuota(context.Background(), req)
+	result, err = q.FetchQuota(context.Background(), req)
 	if err != nil || result.Groups[0].Buckets[0].RemainingFraction != 0.8 || count != 1 {
 		t.Fatalf("header did not replace cached poll: %+v %v", result, err)
 	}
@@ -53,7 +53,7 @@ func TestQuotaPollSurfacesPlanChip(t *testing.T) {
 		{"missing plan leaves no subscription", `{"api_key":"example-key"}`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := q.cache.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: tc.name, StorageJSON: []byte(tc.storage)})
+			result, err := q.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: tc.name, StorageJSON: []byte(tc.storage)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -80,11 +80,11 @@ func TestQuotaHeaderPreservesPlanChip(t *testing.T) {
 	defer s.Close()
 	q := newQuotaProvider(s.URL, s.Client())
 	req := pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: "plan-auth", StorageJSON: []byte(`{"api_key":"example-key","plan":"big"}`)}
-	if _, err := q.cache.FetchQuota(context.Background(), req); err != nil {
+	if _, err := q.FetchQuota(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
 	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "synthetic", AuthID: "plan-auth", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
-	result, err := q.cache.FetchQuota(context.Background(), req)
+	result, err := q.FetchQuota(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,38 +99,59 @@ func TestQuotaHeaderPreservesPlanChip(t *testing.T) {
 	}
 }
 
-// A plan edited while traffic flows must not read stale forever: once the
-// remembered plan passes its max age, header updates drop the chip instead
-// of repeating the wrong plan until a poll refreshes it.
-func TestQuotaHeaderDropsStalePlan(t *testing.T) {
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"planWeeklyLimit":{"percentRemaining":25}}`))
-	}))
-	defer s.Close()
-	q := newQuotaProvider(s.URL, s.Client())
-	now := time.Now()
-	q.now = func() time.Time { return now }
-	req := pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: "edit-auth", StorageJSON: []byte(`{"api_key":"example-key","plan":"big"}`)}
-	if _, err := q.cache.FetchQuota(context.Background(), req); err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(planMaxAge + time.Minute)
-	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "synthetic", AuthID: "edit-auth", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
-	result, err := q.cache.FetchQuota(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Groups[0].Buckets[0].RemainingFraction != 0.8 {
-		t.Fatalf("header did not update the bar: %+v", result)
-	}
-	if result.Subscription != nil {
-		t.Fatalf("stale plan must drop instead of repeating: %+v", result.Subscription)
+// Header observations are unbound, but their plan chip must always come from
+// the current fetch's auth fields, even before the old poll's TTL expires.
+func TestQuotaHeaderUsesCurrentPlanAcrossEditsAndRotations(t *testing.T) {
+	for _, tc := range []struct {
+		name, storage, want string
+	}{
+		{"same key edited plan", `{"api_key":"example-key","plan":"go"}`, "go"},
+		{"same key removed plan", `{"api_key":"example-key"}`, ""},
+		{"rotated key new plan", `{"api_key":"rotated-key","plan":"standard"}`, "standard"},
+		{"rotated key no plan", `{"api_key":"rotated-key"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			count := 0
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				count++
+				_, _ = w.Write([]byte(`{"planWeeklyLimit":{"percentRemaining":25}}`))
+			}))
+			defer s.Close()
+			q := newQuotaProvider(s.URL, s.Client())
+			now := time.Now()
+			q.now = func() time.Time { return now }
+			req := pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: "edit-auth", StorageJSON: []byte(`{"api_key":"example-key","plan":"big"}`)}
+			if _, err := q.FetchQuota(context.Background(), req); err != nil {
+				t.Fatal(err)
+			}
+			req.StorageJSON = []byte(tc.storage)
+			// Refresh observations below their TTL for longer than the old plan
+			// age limit. No expiry or traffic gap can hide a stale-plan bug.
+			for elapsed := time.Duration(0); elapsed <= 11*time.Minute; elapsed += 30 * time.Second {
+				q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "synthetic", AuthID: req.AuthID, ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
+				result, err := q.FetchQuota(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.Groups[0].Buckets[0].RemainingFraction != 0.8 || count != 1 {
+					t.Fatalf("header should serve without polling: %+v, polls=%d", result, count)
+				}
+				got := ""
+				if result.Subscription != nil {
+					got = result.Subscription.Plan
+				}
+				if got != tc.want {
+					t.Fatalf("plan after %v = %q, want %q", elapsed, got, tc.want)
+				}
+				now = now.Add(30 * time.Second)
+			}
+		})
 	}
 }
 func TestQuotaUsageRejectsForeignProvider(t *testing.T) {
 	q := newQuotaProvider("", nil)
 	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "foreign", AuthID: "a", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":80}}`}}})
-	_, err := q.cache.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: "a"})
+	_, err := q.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{Provider: "synthetic", AuthID: "a"})
 	if err == nil {
 		t.Fatal("foreign header was accepted")
 	}
@@ -150,6 +171,29 @@ func TestLegacyQuotaDoesNotClaimWeeklyCredits(t *testing.T) {
 	}
 	if violations := providerkit.CheckCard(got); len(violations) != 0 {
 		t.Fatalf("CheckCard violations: %v", violations)
+	}
+}
+
+func TestSubscriptionSummaryReportsAbsoluteCounters(t *testing.T) {
+	r, err := parseQuota([]byte(`{"subscription":{"limit":135,"requests":27,"renewsAt":"2025-09-21T14:36:14.288Z"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := normalizeQuota(r)
+	if len(got.Groups) != 1 || got.Groups[0].Buckets[0].Window != "Renewal" || got.Groups[0].Buckets[0].RemainingFraction != 0.8 {
+		t.Fatalf("subscription bucket wrong: %+v", got)
+	}
+	used, limit := -1.0, -1.0
+	for _, metric := range got.Summary {
+		switch metric.Key {
+		case "subscription_requests_used":
+			used = metric.Value
+		case "subscription_request_limit":
+			limit = metric.Value
+		}
+	}
+	if used != 27 || limit != 135 {
+		t.Fatalf("subscription absolutes missing from Summary: %+v", got.Summary)
 	}
 }
 
@@ -201,9 +245,10 @@ func TestMultiShapeQuotaEmitsOneBucketPerShape(t *testing.T) {
 	if windows["weekly"] != 0.25 || windows[providerkit.CardWindowFiveHour] != 0.5 || windows["Renewal"] != 0.6 {
 		t.Fatalf("wrong per-shape fractions: %+v", got)
 	}
-	// None of these shapes regenerates, so no refill chip is emitted.
-	if len(got.Summary) != 0 {
-		t.Fatalf("unexpected summary: %+v", got)
+	// Only the subscription's absolute counters become summary metrics;
+	// weekly and five-hour regeneration never emits a refill chip.
+	if len(got.Summary) != 2 || got.Summary[0].Key != "subscription_requests_used" || got.Summary[0].Value != 40 || got.Summary[1].Key != "subscription_request_limit" || got.Summary[1].Value != 100 {
+		t.Fatalf("subscription counters lost in multi-shape output: %+v", got)
 	}
 	if violations := providerkit.CheckCard(got); len(violations) != 0 {
 		t.Fatalf("CheckCard violations: %v", violations)
