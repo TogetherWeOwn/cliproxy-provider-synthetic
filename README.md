@@ -113,8 +113,9 @@ derive utilization. Regeneration percents are incremental hints, not plan
 data, and never become refill chips. A regeneration timestamp is the **next increment, not a full
 reset**, so it is never shown for weekly ticks — only `subscription`
 renewals reset the allowance and keep their reset time. The optional auth
-`plan` field (go, standard or big) surfaces as the plan chip; header updates
-carry no auth fields but keep the remembered plan. Legacy
+`plan` field (go, standard or big) surfaces as the plan chip. Each quota fetch
+attaches the current auth fields after reading cached quota data, so header
+updates cannot repeat a previous plan after an edit or key rotation. Legacy
 five-hour/subscription buckets appear only if those shapes are actually
 returned. No numeric plan allowance is hard-coded. Quota reset is unsupported;
 a web-UI reset entitlement is not an API.

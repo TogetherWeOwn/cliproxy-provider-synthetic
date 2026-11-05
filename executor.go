@@ -38,12 +38,12 @@ func (e executor) forAuth(id string, storage []byte, meta map[string]any) kit.Pa
 // payload model to the stripped execution model for registered plugin models,
 // but raw HTTP execution and unregistered models can still arrive pinned, and
 // without this the pinned shape "<acct>/synthetic/<id>" fails the provider
-// prefix check below. The host pins the auth prefix verbatim
-// ("<prefix>/<id>"), so any non-empty prefix strips verbatim. Production
-// auth files use the generic host path, not the documented ParseAuth helper.
+// prefix check below. Match the generic host file loader's normalization:
+// surrounding whitespace/slashes are trimmed and internal slashes invalidate
+// the routing prefix. Metadata itself retains the original value.
 func stripHostPrefix(model string, meta map[string]any) string {
 	prefix, _ := meta["prefix"].(string)
-	if prefix = strings.TrimSpace(prefix); prefix == "" {
+	if prefix = strings.Trim(strings.TrimSpace(prefix), "/"); prefix == "" || strings.Contains(prefix, "/") {
 		return model
 	}
 	return strings.TrimPrefix(model, prefix+"/")

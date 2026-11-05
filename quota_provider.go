@@ -27,24 +27,10 @@ type readingKey struct {
 	hasCred bool
 }
 
-// planMaxAge bounds how long a header update may repeat a remembered plan.
-// Headers carry no auth fields, so a plan edited mid-traffic would otherwise
-// read stale until a traffic gap lets a poll through; after this age the
-// chip drops instead of risking the wrong plan. Polls always reattach the
-// current plan.
-const planMaxAge = 10 * time.Minute
-
 type timedReading struct {
 	readings   []quotaReading
 	observedAt time.Time
 	expires    time.Time
-	// plan is the display-only auth plan remembered alongside the readings so
-	// a header update (which carries no auth fields) keeps the plan chip
-	// instead of wiping it until the next poll.
-	plan string
-	// planAt is when that plan was last reported by a poll; header-only
-	// remembers never move it.
-	planAt time.Time
 }
 
 func (q *quotaProvider) clock() time.Time {
@@ -67,7 +53,7 @@ func credentialDigest(storage []byte, meta map[string]any) [32]byte {
 
 // These observations are response-classification hints only. They never select
 // an account, avoid an account preemptively, or alter the host's scheduler.
-func (q *quotaProvider) remember(key readingKey, readings []quotaReading, observedAt time.Time, plan string) {
+func (q *quotaProvider) remember(key readingKey, readings []quotaReading, observedAt time.Time) {
 	if key.id == "" || len(readings) == 0 {
 		return
 	}
@@ -87,49 +73,32 @@ func (q *quotaProvider) remember(key readingKey, readings []quotaReading, observ
 	}
 	kept := make([]quotaReading, len(readings))
 	copy(kept, readings)
-	next := timedReading{readings: kept, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
-	if plan != "" {
-		next.plan, next.planAt = plan, observedAt
-	} else {
-		// Headers carry no plan. Preserve the newest remembered display plan,
-		// without extending its age or sharing classification hints.
-		for storedKey, current := range q.readings {
-			if storedKey.id == key.id && current.planAt.After(next.planAt) {
-				next.plan, next.planAt = current.plan, current.planAt
-			}
-		}
-	}
-	q.readings[key] = next
+	q.readings[key] = timedReading{readings: kept, observedAt: observedAt, expires: observedAt.Add(providerkit.QuotaCacheTTL)}
 }
 
-// planFor returns the remembered display-only plan for an auth, or "" when
-// none was reported, the observation expired, or the plan itself is older
-// than planMaxAge (an edited plan then drops the chip instead of showing the
-// wrong one until a poll refreshes it).
-func (q *quotaProvider) planFor(id string) string {
-	if q == nil || id == "" {
-		return ""
+func (q *quotaProvider) DescribeQuota(ctx context.Context, req pluginapi.QuotaDescribeRequest) (pluginapi.QuotaDescribeResponse, error) {
+	return q.cache.DescribeQuota(ctx, req)
+}
+
+func (q *quotaProvider) ResetQuota(ctx context.Context, req pluginapi.QuotaResetRequest) (pluginapi.QuotaResetResponse, error) {
+	return q.cache.ResetQuota(ctx, req)
+}
+
+func (q *quotaProvider) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+	out, err := q.cache.FetchQuota(ctx, req)
+	if err != nil {
+		return out, err
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	now := q.clock()
-	var best timedReading
-	for key, r := range q.readings {
-		if key.id != id {
-			continue
-		}
-		if !now.Before(r.expires) {
-			delete(q.readings, key)
-			continue
-		}
-		if r.planAt.After(best.planAt) {
-			best = r
+	// Plans are display-only auth fields, never header observations. Attach
+	// the current request's plan after any cache hit so edits and key rotations
+	// cannot repeat an old credential's label under the same auth identity.
+	out.Subscription = nil
+	if fields, ferr := providerkit.AuthFields(req.StorageJSON, req.Metadata); ferr == nil {
+		if p, ok := fields["plan"].(string); ok && strings.TrimSpace(p) != "" {
+			out.Subscription = &pluginapi.QuotaSubscription{Plan: strings.TrimSpace(p)}
 		}
 	}
-	if best.planAt.IsZero() || now.Sub(best.planAt) >= planMaxAge {
-		return ""
-	}
-	return best.plan
+	return out, nil
 }
 
 // latest returns the first shape from the newest matching generation or
@@ -189,20 +158,8 @@ func newQuotaProvider(endpoint string, client httpDoer) *quotaProvider {
 		if err != nil {
 			return pluginapi.QuotaFetchResponse{}, err
 		}
-		// The plan field is display-only: the panel shows it as the plan
-		// chip, and it never affects admission or identity.
-		plan := ""
-		if fields, ferr := providerkit.AuthFields(req.StorageJSON, req.Metadata); ferr == nil {
-			if p, ok := fields["plan"].(string); ok {
-				plan = strings.TrimSpace(p)
-			}
-		}
-		q.remember(readingKey{id: quotaIdentity(req.AuthID, req.AuthIndex), cred: credentialDigest(req.StorageJSON, req.Metadata), hasCred: true}, readings, observedAt, plan)
-		out := normalizeQuotas(readings)
-		if plan != "" {
-			out.Subscription = &pluginapi.QuotaSubscription{Plan: plan}
-		}
-		return out, nil
+		q.remember(readingKey{id: quotaIdentity(req.AuthID, req.AuthIndex), cred: credentialDigest(req.StorageJSON, req.Metadata), hasCred: true}, readings, observedAt)
+		return normalizeQuotas(readings), nil
 	})
 	return q
 }
@@ -278,13 +235,8 @@ func (q *quotaProvider) HandleUsage(_ context.Context, record pluginapi.UsageRec
 	}
 	if readings, ok := quotaReadingsFromHeaders(record.ResponseHeaders); ok {
 		id := quotaIdentity(record.AuthID, record.AuthIndex)
-		q.remember(readingKey{id: id}, readings, q.clock(), "")
+		q.remember(readingKey{id: id}, readings, q.clock())
 		out := normalizeQuotas(readings)
-		// Headers carry no auth fields, so reattach the remembered plan:
-		// otherwise the plan chip vanishes until the next poll.
-		if plan := q.planFor(id); plan != "" {
-			out.Subscription = &pluginapi.QuotaSubscription{Plan: plan}
-		}
 		_ = q.cache.Store(pluginapi.QuotaFetchRequest{Provider: record.Provider, AuthID: record.AuthID, AuthIndex: record.AuthIndex}, out)
 	}
 }

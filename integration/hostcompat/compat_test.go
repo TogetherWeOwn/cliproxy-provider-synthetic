@@ -235,6 +235,23 @@ func TestRealHostLoader(t *testing.T) {
 	if polls.Load() != 1 {
 		t.Fatal("header update triggered a quota poll")
 	}
+	t.Run("header quota uses current auth plan", func(t *testing.T) {
+		current := quotaReq
+		for _, plan := range []string{"big", "go", ""} {
+			current.StorageJSON, _ = json.Marshal(map[string]any{"api_key": "rotated-key", "plan": plan})
+			out, handled, err := host.FetchQuota(ctx, current)
+			if err != nil || !handled || len(out.Groups) != 1 || out.Groups[0].Buckets[0].RemainingFraction != .88 || polls.Load() != 1 {
+				t.Fatalf("cached header quota %+v %v %v polls=%d", out, handled, err, polls.Load())
+			}
+			got := ""
+			if out.Subscription != nil {
+				got = out.Subscription.Plan
+			}
+			if got != plan {
+				t.Fatalf("plan = %q, want current auth plan %q", got, plan)
+			}
+		}
+	})
 	infinite := coreexec.Request{Model: "synthetic/infinite:small:vision", Payload: []byte(`{"model":"synthetic/infinite:small:vision","messages":[{"role":"user","content":"hello"}]}`), Format: translator.FormatOpenAI}
 	resp, err = ex.Execute(ctx, auth, infinite, opts)
 	if err != nil || !strings.Contains(string(resp.Payload), `"object":"chat.completion"`) || !strings.Contains(string(resp.Payload), `"content":"hello"`) || !strings.Contains(string(resp.Payload), `"total_tokens":5`) {
@@ -362,7 +379,7 @@ func TestRealHostLoader(t *testing.T) {
 	})
 	t.Run("pinned prefix routes and strips end to end", func(t *testing.T) {
 		// API-key auth uses the generic file path, not the plugin parser.
-		raw := []byte(`{"type":"synthetic","api_key":"pinned-key","prefix":"acct"}`)
+		raw := []byte(`{"type":"synthetic","api_key":"pinned-key","prefix":" /acct/ "}`)
 		var metadata map[string]any
 		if err := json.Unmarshal(raw, &metadata); err != nil {
 			t.Fatal(err)

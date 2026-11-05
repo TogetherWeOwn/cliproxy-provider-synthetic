@@ -112,7 +112,10 @@ func TestBuildRequestStripsPinnedHostPrefix(t *testing.T) {
 		{"pinned infinite forces stream", "acct/synthetic/infinite:small:vision", pinned, "infinite:small:vision", true},
 		{"host already stripped", "synthetic/syn:small:text", pinned, "syn:small:text", false},
 		{"no metadata", "synthetic/syn:small:text", nil, "syn:small:text", false},
-		{"slashed prefix strips verbatim like the host pins", "a/b/synthetic/syn:small:text", map[string]any{"prefix": "a/b"}, "syn:small:text", false},
+		{"trailing slash", "acct/synthetic/syn:small:text", map[string]any{"prefix": "acct/"}, "syn:small:text", false},
+		{"outer slashes and whitespace", "acct/synthetic/syn:small:text", map[string]any{"prefix": " /acct// "}, "syn:small:text", false},
+		{"padded infinite forces stream", "acct/synthetic/infinite:small:vision", map[string]any{"prefix": "/acct/"}, "infinite:small:vision", true},
+		{"empty normalized prefix leaves model alone", "synthetic/syn:small:text", map[string]any{"prefix": " /// "}, "syn:small:text", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload, _ := json.Marshal(map[string]any{"model": tc.model, "messages": []any{}})
@@ -134,6 +137,9 @@ func TestBuildRequestStripsPinnedHostPrefix(t *testing.T) {
 		{"wrong prefix is not a provider model", "other/synthetic/syn:small:text", pinned},
 		{"pinned bare id has no provider prefix", "acct/syn:small:text", pinned},
 		{"pinned provider prefix alone names no model", "acct/synthetic/", pinned},
+		{"internal slash is not a host routing prefix", "a/b/synthetic/syn:small:text", map[string]any{"prefix": "a/b"}},
+		{"empty normalized prefix cannot strip a slash", "/synthetic/syn:small:text", map[string]any{"prefix": " /// "}},
+		{"prefix only strips once", "acct/acct/synthetic/syn:small:text", pinned},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload, _ := json.Marshal(map[string]any{"model": tc.model})

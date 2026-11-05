@@ -82,7 +82,7 @@ func TestQuotaHintsExpireForBoundAndUnboundReadings(t *testing.T) {
 			key.cred = digest
 		}
 		observedAt := now
-		q.remember(key, []quotaReading{{PercentRemaining: floatPtr(0), NextRegenAt: now.Add(time.Hour)}}, observedAt, "")
+		q.remember(key, []quotaReading{{PercentRemaining: floatPtr(0), NextRegenAt: now.Add(time.Hour)}}, observedAt)
 		if q.latest("account", digest) == nil {
 			t.Fatalf("fresh hint missing, bound=%v", hasCred)
 		}
