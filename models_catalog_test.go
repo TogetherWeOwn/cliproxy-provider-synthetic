@@ -43,7 +43,7 @@ func (s *stubFetch) fetch(context.Context, pluginapi.AuthModelRequest) ([]plugin
 func stubModels(ids ...string) []pluginapi.ModelInfo {
 	out := make([]pluginapi.ModelInfo, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, pluginapi.ModelInfo{ID: id, Object: "model", DisplayName: id})
+		out = append(out, pluginapi.ModelInfo{ID: id, Object: "model", OwnedBy: provider, DisplayName: id})
 	}
 	return out
 }
@@ -111,6 +111,11 @@ func TestModelCatalogParseAndOverrides(t *testing.T) {
 	}
 	if resp.Models[0].DisplayName != "Syn Small Text" || resp.Models[0].Created != 123 || resp.Models[0].OwnedBy != "synthetic" {
 		t.Fatalf("parsed/overridden %+v, want created/owned_by carried and DisplayName overridden", resp.Models[0])
+	}
+	// The hf entry arrives without optional fields; discovery must stamp
+	// the defaults the hand-rolled catalog always produced.
+	if m := resp.Models[1]; m.Object != "model" || m.OwnedBy != provider || m.DisplayName != "hf:acme/widget" {
+		t.Fatalf("unstamped metadata %+v, want object/owned_by/display-name defaults", m)
 	}
 
 	sresp, err := over.StaticModels(context.Background(), pluginapi.StaticModelRequest{Plugin: pluginapi.Metadata{Name: provider}})

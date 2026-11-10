@@ -89,6 +89,20 @@ func fetchModels(ctx context.Context, req pluginapi.AuthModelRequest) ([]plugina
 		if m.ID = strings.TrimSpace(m.ID); m.ID == "" {
 			continue
 		}
+		// The kit fetcher passes upstream object/owned_by through and
+		// never sets a display name, so an upstream list that omits the
+		// optional fields would serve models without metadata. Fill the
+		// same defaults the hand-rolled discovery always produced
+		// (overrides may still replace the display name downstream).
+		if m.Object == "" {
+			m.Object = "model"
+		}
+		if m.OwnedBy == "" {
+			m.OwnedBy = provider
+		}
+		if m.DisplayName == "" {
+			m.DisplayName = m.ID
+		}
 		out = append(out, m)
 	}
 	return out, nil
