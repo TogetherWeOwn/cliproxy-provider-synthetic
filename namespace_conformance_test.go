@@ -12,19 +12,20 @@ import (
 )
 
 // Every id this plugin can emit carries the fixed "synthetic/" namespace
-// exactly once: static fallback, registrar, and a discovery refresh.
+// exactly once: static fallback, registrar, and a discovery refresh, all
+// through the kit ModelCatalog pipeline.
 func TestModelNamespaceConformance(t *testing.T) {
 	ctx := context.Background()
+	cat := newModelCatalog()
 	var all []pluginapi.ModelInfo
-	all = append(all, fallbackModels()...)
 
-	reg, err := catalog{}.RegisterModels(ctx, pluginapi.ModelRegistrationRequest{})
+	reg, err := cat.RegisterModels(ctx, pluginapi.ModelRegistrationRequest{Plugin: pluginapi.Metadata{Name: modelNamespace}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	all = append(all, reg.Models...)
 
-	static, err := catalog{}.StaticModels(ctx, pluginapi.StaticModelRequest{})
+	static, err := cat.StaticModels(ctx, pluginapi.StaticModelRequest{Plugin: pluginapi.Metadata{Name: modelNamespace}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +35,7 @@ func TestModelNamespaceConformance(t *testing.T) {
 		io.WriteString(w, `{"data":[{"id":"syn:large:text"},{"id":"infinite:small:vision"},{"id":"hf:example/model"}]}`)
 	}))
 	defer server.Close()
-	discovered, err := catalog{}.ModelsForAuth(ctx, pluginapi.AuthModelRequest{StorageJSON: []byte(`{"api_key":"example-key"}`), HTTPClient: mockHostClient{server}})
+	discovered, err := cat.ModelsForAuth(ctx, pluginapi.AuthModelRequest{StorageJSON: []byte(`{"api_key":"example-key"}`), HTTPClient: mockHostClient{server}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,5 +44,5 @@ func TestModelNamespaceConformance(t *testing.T) {
 	if len(all) == 0 {
 		t.Fatal("no models to check")
 	}
-	kit.AssertModelNamespace(t, "synthetic", all)
+	kit.AssertModelNamespace(t, modelNamespace, all)
 }

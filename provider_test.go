@@ -83,12 +83,12 @@ func TestBuildRequestStripsOnlyProviderPrefixAndPreservesPayload(t *testing.T) {
 }
 
 func TestStaticCatalogOnlyPrefixedChatModels(t *testing.T) {
-	c := catalog{}
+	c := newModelCatalog()
 	static, err := c.StaticModels(context.Background(), pluginapi.StaticModelRequest{})
 	if err != nil || len(static.Models) < 5 {
 		t.Fatalf("catalog %+v %v", static, err)
 	}
-	reg, err := c.RegisterModels(context.Background(), pluginapi.ModelRegistrationRequest{})
+	reg, err := c.RegisterModels(context.Background(), pluginapi.ModelRegistrationRequest{Plugin: pluginapi.Metadata{Name: provider}})
 	if err != nil || len(reg.Models) != len(static.Models) {
 		t.Fatalf("registration %+v %v", reg, err)
 	}

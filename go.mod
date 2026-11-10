@@ -3,7 +3,7 @@ module github.com/TogetherWeOwn/cliproxy-provider-synthetic
 go 1.26.10
 
 require (
-	github.com/TogetherWeOwn/cliproxy-provider-kit v0.4.4-0.20261105031516-c0ea8551f626
+	github.com/TogetherWeOwn/cliproxy-provider-kit v0.5.0
 	github.com/router-for-me/CLIProxyAPI/v8 v8.0.49
 	gopkg.in/yaml.v3 v3.0.1
 )
