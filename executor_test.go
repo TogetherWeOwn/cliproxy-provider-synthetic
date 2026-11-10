@@ -279,7 +279,7 @@ func TestDiscoveryPrefixesFiltersAndDoesNotInventEntitlements(t *testing.T) {
 		io.WriteString(w, `{"data":[{"id":"syn:small:text"},{"id":"infinite:small:vision"},{"id":"hf:example/model"},{"id":"hf:nomic-ai/nomic-embed-text-v1.5"},{"id":"syn:small:text"},{"id":""}]}`)
 	}))
 	defer server.Close()
-	out, err := (catalog{}).ModelsForAuth(context.Background(), pluginapi.AuthModelRequest{StorageJSON: []byte(`{"api_key":"example-key","plan":"go"}`), HTTPClient: mockHostClient{server}})
+	out, err := newModelCatalog().ModelsForAuth(context.Background(), pluginapi.AuthModelRequest{StorageJSON: []byte(`{"api_key":"example-key","plan":"go"}`), HTTPClient: mockHostClient{server}})
 	if err != nil || len(out.Models) != 3 {
 		t.Fatalf("discovery %+v %v", out, err)
 	}

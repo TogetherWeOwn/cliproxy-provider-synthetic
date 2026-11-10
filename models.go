@@ -2,65 +2,120 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 
 	kit "github.com/TogetherWeOwn/cliproxy-provider-kit"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
-type catalog struct{}
-
+// Model serving is delegated to the kit ModelCatalog (v0.5.0): every
+// ModelsForAuth invocation attempts one fresh fetch (fetch → glob →
+// overrides → Validate → cache → serve); a failed fetch, oversized body or
+// failed Validate falls back to the durable last-good list for that
+// credential generation, then to Static. No background fetch runs: a failed
+// one-shot callback is not retried by the kit and recovery waits for the
+// next host event. Static models are upstream (pre-namespace) ids; the
+// catalog prefixes them with modelNamespace.
 func fallbackModels() []pluginapi.ModelInfo {
 	ids := []string{"syn:large:text", "syn:small:text", "syn:large:vision", "syn:small:vision", "infinite:small:vision"}
 	out := make([]pluginapi.ModelInfo, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, pluginapi.ModelInfo{ID: modelPrefix + id, Object: "model", OwnedBy: provider, DisplayName: id})
+		out = append(out, pluginapi.ModelInfo{ID: id, Object: "model", OwnedBy: provider, DisplayName: id})
 	}
 	return out
 }
-func (catalog) RegisterModels(context.Context, pluginapi.ModelRegistrationRequest) (pluginapi.ModelRegistrationResponse, error) {
-	return pluginapi.ModelRegistrationResponse{Provider: provider, Models: fallbackModels()}, nil
+
+// modelGlobs translates the previous hand-rolled discovery filter into the
+// kit's path globs. Deny wins and "*" does not cross "/", so the hf shapes
+// need both a slashless and a slashed pattern:
+//
+//   - allowed upstream shapes are the chat namespaces the v1 executor
+//     implements (syn:, infinite:, hf:<org>/<model>);
+//   - embedding models are outside v1's scope. The case-sensitive globs
+//     below cover the common lowercase shapes; validateModels is the
+//     authoritative case-insensitive check for the rest.
+func modelGlobs() (allow, deny []string) {
+	return []string{"syn:*", "infinite:*", "hf:*", "hf:*/*"}, []string{"*embed*", "*/*embed*"}
 }
-func (catalog) StaticModels(context.Context, pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
-	return pluginapi.ModelResponse{Provider: provider, Models: fallbackModels()}, nil
-}
-func (catalog) ModelsForAuth(ctx context.Context, r pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
-	key, err := kit.APIKey(r.StorageJSON, r.Metadata)
-	if err != nil {
-		return pluginapi.ModelResponse{}, err
-	}
-	if r.HTTPClient == nil {
-		return pluginapi.ModelResponse{}, &pluginabi.Error{Code: "host_unavailable", Message: "model discovery requires the host HTTP client", HTTPStatus: 503}
-	}
-	resp, err := r.HTTPClient.Do(ctx, pluginapi.HTTPRequest{Method: http.MethodGet, URL: selectedBase(upstreamBase) + "/openai/v1/models", Headers: http.Header{"Authorization": {"Bearer " + key}, "Accept": {"application/json"}}})
-	if err != nil {
-		return pluginapi.ModelResponse{}, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return pluginapi.ModelResponse{}, classifyResponse(resp)
-	}
-	var wire struct {
-		Data []struct {
-			ID string `json:"id"`
-		}
-	}
-	if len(resp.Body) > maxQuotaResponse || json.Unmarshal(resp.Body, &wire) != nil || wire.Data == nil {
-		return pluginapi.ModelResponse{}, &pluginabi.Error{Code: "invalid_models", Message: "Synthetic returned an invalid model catalog", HTTPStatus: 502}
-	}
-	out := pluginapi.ModelResponse{Provider: provider}
-	seen := make(map[string]bool)
-	for _, model := range wire.Data {
-		id := strings.TrimSpace(model.ID)
-		// The v1 executor implements chat, not embeddings. Only recognized Synthetic
-		// namespaces are accepted; aliases and pinned IDs remain upstream-owned.
-		if id == "" || strings.Contains(strings.ToLower(id), "embed") || !(strings.HasPrefix(id, "syn:") || strings.HasPrefix(id, "infinite:") || strings.HasPrefix(id, "hf:")) || seen[id] {
+
+// validateModels is the kit post-fetch hook. It runs after the globs and
+// overrides, before namespacing, on the fresh path only. It mirrors the
+// previous discovery rule that embedding models are dropped
+// case-insensitively: glob deny is case-sensitive, so an id such as
+// "syn:EMBED-model" which passed the allow globs is still rejected here.
+func validateModels(_ context.Context, _ pluginapi.AuthModelRequest, models []pluginapi.ModelInfo) ([]pluginapi.ModelInfo, error) {
+	out := make([]pluginapi.ModelInfo, 0, len(models))
+	for _, m := range models {
+		if strings.Contains(strings.ToLower(m.ID), "embed") {
 			continue
 		}
-		seen[id] = true
-		out.Models = append(out.Models, pluginapi.ModelInfo{ID: modelPrefix + id, Object: "model", OwnedBy: provider, DisplayName: id})
+		out = append(out, m)
 	}
 	return out, nil
+}
+
+// fetchModels is this plugin's OpenAI-style discovery fetch. The kit
+// fetcher is built per call so the effective base URL is resolved through
+// selectedBase at request time: the hostcompat test build points discovery
+// at its loopback mock while production targets api.synthetic.new, exactly
+// like the previously hand-wired fetch. OpenAIModelsFetcher sends the
+// Bearer auth derived from the request; the kit never derives credentials
+// itself. The catalog enforces the kit's 15s ModelsFetchTimeout deadline
+// and 1 MiB post-return parse cap (MaxModelsBody) around the fetch: an
+// oversized buffered body is a failed fetch (never parsed, never cached as
+// last-good). The kit also bounds a nil host client to the same fallback:
+// when nothing is available the fetch error is surfaced by the catalog.
+func fetchModels(ctx context.Context, req pluginapi.AuthModelRequest) ([]pluginapi.ModelInfo, error) {
+	// Cheap local validation before any network use; the catalog turns
+	// the error below into a last-good/static fallback for this
+	// credential generation instead of surfacing it directly.
+	if _, err := kit.APIKey(req.StorageJSON, req.Metadata); err != nil {
+		return nil, err
+	}
+	fetcher := kit.OpenAIModelsFetcher(selectedBase(upstreamBase), "/openai/v1/models", func(r pluginapi.AuthModelRequest) http.Header {
+		key, _ := kit.APIKey(r.StorageJSON, r.Metadata)
+		return http.Header{"Authorization": {"Bearer " + key}, "Accept": {"application/json"}}
+	})
+	raw, err := fetcher(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	// Preserve the previous trimming: upstream ids arrive clean, but a
+	// padded id would fail the allow globs untrimmed, so trim before the
+	// kit pipeline (globs/overrides) sees it.
+	out := make([]pluginapi.ModelInfo, 0, len(raw))
+	for _, m := range raw {
+		if m.ID = strings.TrimSpace(m.ID); m.ID == "" {
+			continue
+		}
+		// The kit fetcher passes upstream object/owned_by through and
+		// never sets a display name, so an upstream list that omits the
+		// optional fields would serve models without metadata. Fill the
+		// same defaults the hand-rolled discovery always produced
+		// (overrides may still replace the display name downstream).
+		if m.Object == "" {
+			m.Object = "model"
+		}
+		if m.OwnedBy == "" {
+			m.OwnedBy = provider
+		}
+		if m.DisplayName == "" {
+			m.DisplayName = m.ID
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+func newModelCatalog() *kit.ModelCatalog {
+	allow, deny := modelGlobs()
+	return kit.NewModelCatalog(kit.ModelCatalogConfig{
+		Namespace: modelNamespace,
+		Static:    fallbackModels(),
+		Fetch:     fetchModels,
+		Allow:     allow,
+		Deny:      deny,
+		Validate:  validateModels,
+	})
 }

@@ -3,7 +3,7 @@
 First-class Synthetic API-key auth files, namespaced model discovery, OpenAI
 chat execution and read-only quota cards. Built on
 [`cliproxy-provider-kit`](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
-at `88850ce` (v8.0.49 plugin ABI: answers RPC schema 10, refuses hosts older than schema 10)
+at tag `v0.5.0` (`fa75f1c`) (v8.0.49 plugin ABI: answers RPC schema 10, refuses hosts older than schema 10)
 and tested with the **real CLIProxyAPI v8.0.49 C-ABI loader** (ABI 1, RPC schema 10).
 Requires CLIProxyAPI v8.0.49 or newer.
 
@@ -61,8 +61,18 @@ When per-credential pinning leaves a host prefix in the payload, one leading
 `<prefix>/` segment matching the credential metadata is stripped first. The
 `synthetic/` namespace is then stripped before the upstream request. A wrong
 host prefix is still rejected; this does not change account selection. Discovery
-sends Bearer auth to `/openai/v1/models`; the static registrar supplies stable
-aliases if discovery is unavailable. Embedding models are outside v1's scope.
+is served by the kit `ModelCatalog` (`providerkit.NewModelCatalog`, namespace
+`synthetic`): each per-auth callback performs one OpenAI-style fetch of
+`/openai/v1/models` with Bearer auth — the kit's `OpenAIModelsFetcher` in
+`models.go` — then applies the allow/deny globs (chat namespaces only;
+embedding models denied), the Validate hook, durable per-generation
+last-good caching and the `synthetic/` prefix. The catalog derives a 15-second
+fetch deadline (the earlier of its own timeout and the parent context wins)
+and drops discovery bodies over 1 MiB without parsing them; a failed fetch
+falls back to last-good, then to the static registrar's stable aliases. The
+kit performs a single fetch per callback with no retry: if that fetch fails,
+recovery waits for the next host event, so failure-then-recovery is never
+promised. Embedding models are outside v1's scope.
 Discovery does not assume that a `plan` hint grants access to any model.
 
 | Client model ID | Upstream model ID | Notes |
