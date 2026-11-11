@@ -41,9 +41,11 @@ user-supplied `id` field is stored but ignored. Every file loads as its own
 auth, so use one file per key — the same key in two files loads twice instead
 of being rejected. Renaming, editing or deleting a file takes effect when the
 host rescans the auth directory; no plugin restart is needed. Quota is
-display-only and cached for 60 seconds. Polled readings and classification
-hints are bound to the credential generation: editing a key in place does not
-reuse the old key's polled evidence. Header observations carry no credential
+display-only and cached for 60 seconds. The displayed card is keyed by auth
+ID, so an in-place key edit can show the old key's allowance for up to the
+TTL. Classification evidence is stricter: polled readings and scope hints
+are bound to the credential digest, so an edited key never classifies off
+the old key's polled evidence. Header observations carry no credential
 context and remain available to every generation for their TTL.
 
 Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`
