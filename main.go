@@ -11,7 +11,7 @@ import (
 const (
 	provider       = "synthetic"
 	displayName    = "Synthetic"
-	version        = "0.2.4"
+	version        = "0.2.5"
 	modelPrefix    = "synthetic/"
 	modelNamespace = "synthetic"
 	upstreamBase   = "https://api.synthetic.new"

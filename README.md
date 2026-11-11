@@ -3,9 +3,9 @@
 First-class Synthetic API-key auth files, namespaced model discovery, OpenAI
 chat execution and read-only quota cards. Built on
 [`cliproxy-provider-kit`](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
-at tag `v0.5.0` (`fa75f1c`) (v8.0.49 plugin ABI: answers RPC schema 10, refuses hosts older than schema 10)
-and tested with the **real CLIProxyAPI v8.0.49 C-ABI loader** (ABI 1, RPC schema 10).
-Requires CLIProxyAPI v8.0.49 or newer.
+at tag `v0.6.0` (`c860882`) (v8.0.63 plugin ABI: answers RPC schema 10, refuses hosts older than schema 10)
+and tested with the **real CLIProxyAPI v8.0.63 C-ABI loader** (ABI 1, RPC schema 10).
+Requires CLIProxyAPI v8.0.63 or newer.
 
 Multiple distinct-key auth files use the host's native routing and cooldowns.
 There is **no Scheduler**, preemptive quota-percentage avoidance, separate
@@ -41,9 +41,11 @@ user-supplied `id` field is stored but ignored. Every file loads as its own
 auth, so use one file per key — the same key in two files loads twice instead
 of being rejected. Renaming, editing or deleting a file takes effect when the
 host rescans the auth directory; no plugin restart is needed. Quota is
-display-only and cached for 60 seconds. Polled readings and classification
-hints are bound to the credential generation: editing a key in place does not
-reuse the old key's polled evidence. Header observations carry no credential
+display-only and cached for 60 seconds. The displayed card is keyed by auth
+ID, so an in-place key edit can show the old key's allowance for up to the
+TTL. Classification evidence is stricter: polled readings and scope hints
+are bound to the credential digest, so an edited key never classifies off
+the old key's polled evidence. Header observations carry no credential
 context and remain available to every generation for their TTL.
 
 Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`
@@ -145,12 +147,15 @@ Bodies and secrets are never included in public error messages.
 
 ### Pinned host RPC limitation
 
-The v8.0.49 `internal/pluginhost/rpc_client.go` error adapter carries HTTP status
-and retry timing, but does **not** implement the native transient-rate-limit
-marker or preserve the RPC `retryable` flag. Consequently a concurrency-only 429
-can still set `ModelStates[model].Quota.Exceeded` in native cooldown handling,
-despite the plugin's correct classification. The integration test reproduces
-this with positive credits. Do not claim native transient/exhaustion parity.
+The v8.0.63 `internal/pluginhost/rpc_client.go` error adapter carries HTTP status
+and retry timing, but a concurrency-only 429 still cannot reach the native
+transient-rate-limit path: the plugin reports code `concurrency_limit` while the
+adapter only recognizes `transient_rate_limit`, and the RPC `retryable` flag is
+not preserved either. Consequently a concurrency 429 falls into the generic
+429 path and can still set `ModelStates[model].Quota.Exceeded` in native
+cooldown handling, despite the plugin's correct classification. The integration
+test reproduces this with positive credits. Do not claim native
+transient/exhaustion parity.
 
 The host also controls actual cooldown scope/duration: 401/402/403 currently get
 a 30-minute model cooldown regardless of the one-hour RPC hint; ordinary 404 may
@@ -161,7 +166,7 @@ concurrency gap; this repository contains no core patch or HTTP-status disguise.
 
 ## Build, test and package
 
-Requires Go 1.26.10, CGO, a C compiler, `nm`, Python 3 and `zip` on Linux/amd64.
+Requires Go 1.26.11, CGO, a C compiler, `nm`, Python 3 and `zip` on Linux/amd64.
 There are no `replace` directives or sibling-checkout dependencies.
 
 ```sh
@@ -174,7 +179,7 @@ nm -D <output-dir>/synthetic.so | grep cliproxy_plugin_init
 bash scripts/package-release.sh <output-dir>
 ```
 
-The package script creates `synthetic_0.2.4_linux_amd64.zip` containing
+The package script creates `synthetic_0.2.5_linux_amd64.zip` containing
 `synthetic.so` and `LICENSE`, plus `checksums.txt` for the archive. It does not
 publish, install or reload anything. Publish both files together to a matching
 GitHub release; `registry.json` uses the native schema-v1 GitHub-release contract.
@@ -207,5 +212,5 @@ suite, and no live-account validation is claimed.**
 - [Quota API](https://dev.synthetic.new/docs/synthetic/quotas)
 - [Weekly regeneration](https://synthetic.new/rate-limits)
 - [Official client quota shapes](https://github.com/synthetic-lab/octofriend/blob/main/source/utils/quota.ts)
-- [Pinned host source](https://github.com/router-for-me/CLIProxyAPI/tree/v8.0.49)
+- [Pinned host source](https://github.com/router-for-me/CLIProxyAPI/tree/v8.0.63)
 - [Parser provenance](docs/PROVENANCE.md)

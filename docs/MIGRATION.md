@@ -53,16 +53,19 @@ capabilities rather than inferring success from the presence of a file.
 - The legacy `synthetic` and `synthetic-infinite` compatibility entries can share
   **one API key**. Create **one** private `type: synthetic` auth file for that key,
   not one per old entry. Infinite is a model family on the same auth now.
-- For additional distinct legitimate keys, create one file per key. Duplicate
-  keys in separate files are rejected at parse time. The plugin does not infer
-  independent entitlements from multiple keys on the same upstream account.
+- For additional distinct legitimate keys, create one file per key. The
+  plugin registers no AuthProvider, so files load through the host's generic
+  file path: the same key in two files loads twice as two separate auths
+  rather than being rejected. The plugin does not infer independent
+  entitlements from multiple keys on the same upstream account.
 - Use the README schema and mode `0600`. API-key values and labels stay local;
   do not print keys into a shell history, test output, issue or public artifact.
 - Preserve optional native weights, priorities, proxy and disabled settings.
   The optional `plan` field is only a hint, never proof of Big entitlement.
-- Do not set custom auth IDs. They are derived from key fingerprints. Clear the
-  plugin lifecycle before moving an existing key between filenames so stale
-  in-memory duplicate ownership cannot reject the new filename.
+- Do not set custom auth IDs. On the generic file path the auth identity is
+  derived from the file path, so renaming a file changes the auth's identity;
+  polled quota evidence is additionally bound to the credential digest, so an
+  edited key does not inherit the old key's cached exhaustion state.
 
 In staging, omit **both** old Synthetic compatibility entries and remove the
 Synthetic block from the legacy subscription-pool overlay. Keep other provider
@@ -74,8 +77,9 @@ percentages for preemptive account avoidance.
 The repository's tests use mocks only. The following account checks require
 separate authorization; they are not performed by the test or packaging tools.
 
-1. Confirm native plugin registration, auth parse/persistence and duplicate-file
-   rejection. Confirm a stable auth fingerprint across reloading the same file.
+1. Confirm native plugin registration and auth parse/persistence through the
+   generic file path. Confirm a stable, path-derived auth ID across reloading
+   the same file and that the same key in two files loads as two auths.
 2. Inspect the quota card from `/v2/quotas`. Record the actual shape and plan;
    do not hard-code old five-hour counters or a sample subscription allowance.
    A regeneration timestamp must be labeled as the next increment, not a full
@@ -89,10 +93,14 @@ separate authorization; they are not performed by the test or packaging tools.
 5. Verify inference-header observations update the quota card without a poll.
 6. Confirm native routing across distinct auths and sibling isolation for payment
    errors. Re-run mock concurrency/exhaustion tests on the proposed host version.
-   **The current v8.0.49 RPC bridge cannot preserve the native transient marker:**
-   its concurrency-only 429 still becomes model quota-exceeded state. Do not
-   accept native parity or proceed to cutover until the upstream contract and
-   pinned compatibility test are updated. No local core patch is supplied.
+   **The current v8.0.63 RPC bridge cannot preserve the native transient
+   marker:** the plugin reports a concurrency-only 429 with code
+   `concurrency_limit`, but the v8.0.63 adapter only recognizes
+   `transient_rate_limit` (`rpc_client.go` `IsTransientRateLimit`), so the
+   error falls into the generic 429 path and still becomes model
+   quota-exceeded state. Do not accept native parity or proceed to cutover
+   until the upstream contract and pinned compatibility test are updated.
+   No local core patch is supplied.
 
 ## 5. Cut over Synthetic only
 
@@ -105,7 +113,7 @@ authorized deployment window:
    retain native executor ownership and invalidate the test result.
 3. Remove only the Synthetic overlay block from subscription-pool. Do not change
    unrelated provider routing or quota settings.
-4. Install/enable the verified production Synthetic plugin and its deduplicated
+4. Install/enable the verified production Synthetic plugin and its one-key-per-file
    auth files through native host mechanisms. Reload/restart using the host's
    supported lifecycle. Never enable a hostcompat-tagged artifact.
 5. Update downstream model IDs, explicitly communicating the Infinite rename:

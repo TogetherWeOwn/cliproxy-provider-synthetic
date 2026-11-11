@@ -9,7 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
-// Model serving is delegated to the kit ModelCatalog (v0.5.0): every
+// Model serving is delegated to the kit ModelCatalog (v0.6.0): every
 // ModelsForAuth invocation attempts one fresh fetch (fetch → glob →
 // overrides → Validate → cache → serve); a failed fetch, oversized body or
 // failed Validate falls back to the durable last-good list for that
