@@ -27,7 +27,10 @@
 # `size-exception` label is applied or removed or a review is submitted
 # or dismissed, so granting an exception re-evaluates the check without
 # a manual re-run - and revoking it re-runs and fails the gate, instead
-# of leaving a stale passing check on the pull request.
+# of leaving a stale passing check on the pull request. An edit -
+# including a base-branch change that alters the diff - is also a
+# trigger, so a retargeted pull request is re-measured instead of
+# keeping a stale passing check.
 #
 # The weekly tally's schedule lives here, in the caller, because the tally
 # is per-repository. It calls a SEPARATE reusable file so this job can stay
@@ -39,7 +42,7 @@ name: pr-size
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   pull_request_review:
     types: [submitted, dismissed]
   schedule:
@@ -47,7 +50,7 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "Optional PR number to label and gate now (blank runs the weekly tally)"
+        description: "Optional PR number to label and gate now (blank runs the weekly tally). Manual dispatch does not update or satisfy the PR gate check - rerun the PR workflow to clear a failing gate"
         required: false
         type: string
 
