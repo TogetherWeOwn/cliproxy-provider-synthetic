@@ -32,9 +32,20 @@ func TestLateQuotaPollCannotOverwriteNewerHeaderRetryEvidence(t *testing.T) {
 	if err := <-finished; err != nil {
 		t.Fatal(err)
 	}
-	e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429}, now, q.latest("account", credentialDigest([]byte(`{"api_key":"example-key"}`), nil)))
-	if e.RetryAfterSeconds != 120 {
-		t.Fatalf("older poll replaced newer header retry evidence: %+v", e)
+	// The newer header still owns the unscoped retry hint, but a
+	// header-less 429 on this generation is scoped by the still-fresh
+	// bound poll and timed by the bound poll's exhausted refill.
+	digest := credentialDigest([]byte(`{"api_key":"example-key"}`), nil)
+	hint, bound := q.latestReadings("account", digest)
+	if bound == nil {
+		t.Fatal("bound poll hidden behind the newer unbound header")
+	}
+	if got := hint[0].NextRegenAt; !got.Equal(now.Add(120 * time.Second)) {
+		t.Fatalf("newer header lost the retry hint: %+v", hint)
+	}
+	e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429}, now, hint, bound)
+	if !e.CredentialScoped || e.RetryAfterSeconds != 3600 {
+		t.Fatalf("bound poll evidence must scope and time the cooldown: %+v", e)
 	}
 }
 
@@ -56,12 +67,22 @@ func TestQuotaHintsAreBoundToTheirCredentialGeneration(t *testing.T) {
 	if hint := q.latest("account", digestA); hint == nil || !hint.NextRegenAt.Equal(now.Add(time.Hour)) {
 		t.Fatalf("bound hint missed: %+v", hint)
 	}
-	// … but never a rotated credential under the reused identity.
+	// … and same-generation bound evidence still scopes a header-less 429.
+	hint, bound := q.latestReadings("account", digestA)
+	if bound == nil {
+		t.Fatal("bound poll reported unbound")
+	}
+	if e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429}, now, hint, bound); !e.CredentialScoped || e.RetryAfterSeconds != 3600 {
+		t.Fatalf("same-generation bound evidence must scope: %+v", e)
+	}
+	// … but the hint never serves a rotated credential under the reused
+	// identity.
 	if hint := q.latest("account", digestB); hint != nil {
 		t.Fatalf("stale generation hint served: %+v", hint)
 	}
 	// Header observations carry no credential context, so they stay unbound
-	// and serve every generation until the TTL expires.
+	// and still feed the retry hint of every generation until the TTL
+	// expires — including a rotated key under the same auth identity …
 	q.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "synthetic", AuthID: "account", ResponseHeaders: http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":0,"nextRegenAt":"` + now.Add(120*time.Second).Format(time.RFC3339Nano) + `"}}`}}})
 	if hint := q.latest("account", digestB); hint == nil {
 		t.Fatal("unbound header hint not served")
@@ -69,6 +90,26 @@ func TestQuotaHintsAreBoundToTheirCredentialGeneration(t *testing.T) {
 	// … and the newer unbound header wins over the older bound poll.
 	if hint := q.latest("account", digestA); hint == nil || !hint.NextRegenAt.Equal(now.Add(120*time.Second)) {
 		t.Fatalf("newer header did not win: %+v", hint)
+	}
+	// … but an unbound observation never scopes: A's 0%+regen header
+	// must not cool rotated key B's generic 429; the hint still applies.
+	hint, bound = q.latestReadings("account", digestB)
+	if bound != nil {
+		t.Fatal("unbound header observation reported bound")
+	}
+	e := classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429}, now, hint, bound)
+	if e.CredentialScoped || e.RetryAfterSeconds != 120 {
+		t.Fatalf("unbound A evidence scoped rotated B: %+v", e)
+	}
+	// A's own generation differs: A's still-fresh bound poll scopes its
+	// header-less 429 — a newer unbound header must not hide it.
+	hint, bound = q.latestReadings("account", digestA)
+	if bound == nil {
+		t.Fatal("bound poll hidden behind the newer unbound header")
+	}
+	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429}, now, hint, bound)
+	if !e.CredentialScoped || e.RetryAfterSeconds != 3600 {
+		t.Fatalf("bound poll evidence shadowed by unbound header: %+v", e)
 	}
 }
 

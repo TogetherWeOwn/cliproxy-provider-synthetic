@@ -46,7 +46,9 @@ ID, so an in-place key edit can show the old key's allowance for up to the
 TTL. Classification evidence is stricter: polled readings and scope hints
 are bound to the credential digest, so an edited key never classifies off
 the old key's polled evidence. Header observations carry no credential
-context and remain available to every generation for their TTL.
+context, so they remain available to every generation for their TTL as
+retry-timing hints only — they can never credential-scope whichever key
+happens to be current.
 
 Optional host fields include `prefix`, `proxy_url`, `weight`, `priority`
 and `disabled`. The management UI derives the display label from the file
@@ -144,6 +146,29 @@ a web-UI reset entitlement is not an API.
 
 A valid upstream `Retry-After` overrides the 429/default server-error timing.
 Bodies and secrets are never included in public error messages.
+
+A `quota_exhausted` 429 additionally cools the **whole credential** (the host's
+credential-quota path) only when exhaustion is evidenced: a zero-remaining
+credit reading in the response headers, a future `NextRegenAt` on an
+effective reading (response, or fresh cached evidence bound to this
+credential generation when the response carries none) that does not
+affirmatively show credit left — `percentRemaining` absent or at or below
+zero — or a quota marker (`quota`/`credit`) in the first 4 KiB of the
+lowercased body. A `UsageRecord` header observation carries no credential
+material, so it stays unbound: it never scopes any generation — but a
+still-fresh bound poll is tracked separately, so a newer unbound header can
+never hide a bound poll's exhaustion evidence. Exhaustion evidence is
+evaluated across every parsed quota bucket, not only the first: a header
+reporting positive weekly credit beside an empty rolling-five-hour bucket
+still scopes the credential. The scoped cooldown is timed by the latest
+future regen among the exhausted buckets of the source that authorized the
+scope — never by a positive bucket's routine refill tick — so the
+credential does not resume before every empty bucket refills; a marker-only
+scope may still take the newest observation's exhausted refill for timing.
+`NextRegenAt` is a routine incremental-refill tick present at every balance
+level, so a reading reporting credit remaining never scopes on regen alone.
+A header-less generic 429 with no such evidence stays model-scoped with its
+flat 60-second hint.
 
 ### Pinned host RPC limitation
 

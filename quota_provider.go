@@ -106,13 +106,28 @@ func (q *quotaProvider) FetchQuota(ctx context.Context, req pluginapi.QuotaFetch
 // latest returns the first shape from the newest matching generation or
 // unbound header, preserving the historical first-match RetryAfter hint.
 func (q *quotaProvider) latest(id string, cred [32]byte) *quotaReading {
-	if q == nil {
+	hint, _ := q.latestReadings(id, cred)
+	if len(hint) == 0 {
 		return nil
+	}
+	return &hint[0]
+}
+
+// latestReadings returns every shape from two observations: hint is the
+// newest matching observation of any kind (bound poll or unbound header)
+// and supplies retry timing; bound is the newest observation recorded for
+// this credential generation or nil. A UsageRecord carries no credential
+// material, so an unbound header may hint but never scope — and a newer
+// unbound header cannot hide a still-fresh bound poll's evidence.
+func (q *quotaProvider) latestReadings(id string, cred [32]byte) (hint []quotaReading, bound []quotaReading) {
+	if q == nil {
+		return nil, nil
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	now := q.clock()
 	var best *timedReading
+	var bestBound *timedReading
 	for key, r := range q.readings {
 		if key.id != id {
 			continue
@@ -128,12 +143,18 @@ func (q *quotaProvider) latest(id string, cred [32]byte) *quotaReading {
 			entry := r
 			best = &entry
 		}
+		if key.hasCred && (bestBound == nil || r.observedAt.After(bestBound.observedAt)) {
+			entry := r
+			bestBound = &entry
+		}
 	}
-	if best == nil || len(best.readings) == 0 {
-		return nil
+	if best != nil && len(best.readings) > 0 {
+		hint = append([]quotaReading(nil), best.readings...)
 	}
-	reading := best.readings[0]
-	return &reading
+	if bestBound != nil && len(bestBound.readings) > 0 {
+		bound = append([]quotaReading(nil), bestBound.readings...)
+	}
+	return hint, bound
 }
 
 func quotaIdentity(id, index string) string {
