@@ -28,7 +28,8 @@ func (e executor) forAuth(id string, storage []byte, meta map[string]any) kit.Pa
 	p.ClassifyError = func(resp pluginapi.HTTPResponse) error {
 		// Evaluated lazily: a header observation that lands during a long
 		// stream is still fresh evidence when the 429 classifies.
-		return classifyWithQuota(resp, time.Now(), e.quota.latest(id, digest))
+		hint, bound := e.quota.latestReadings(id, digest)
+		return classifyWithQuota(resp, time.Now(), hint, bound)
 	}
 	return p
 }

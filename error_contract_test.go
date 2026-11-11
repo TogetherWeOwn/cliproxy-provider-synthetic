@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	kit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -68,9 +69,44 @@ func TestExecutorExhaustionUsesFreshCachedRegenerationWithoutPolling(t *testing.
 	if !errors.As(err, &e) || e.Code != "quota_exhausted" || e.RetryAfterSeconds < 119 || e.RetryAfterSeconds > 120 {
 		t.Fatalf("cached regeneration not used %+v", err)
 	}
+	// A header observation carries no credential material, so it stays an
+	// unbound retry hint and can never scope whichever credential is current.
+	if e.CredentialScoped {
+		t.Fatalf("unbound header observation must not scope the credential %+v", e)
+	}
 	_, err = newExecutor(q).Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: "other-account", Payload: []byte(`{"model":"synthetic/syn:small:text"}`), StorageJSON: []byte(`{"api_key":"example-key"}`), HTTPClient: mockHostClient{server}})
 	if !errors.As(err, &e) || e.RetryAfterSeconds != 60 {
 		t.Fatalf("cache leaked between accounts %v", err)
+	}
+	if e.CredentialScoped {
+		t.Fatalf("header-less generic 429 must stay model-scoped %+v", e)
+	}
+}
+
+// TestExecutorStreamQuotaErrorIsCredentialScoped proves the stream path
+// surfaces the same evidence-gated credential scope as Execute: a non-2xx
+// stream response classifies through the shared ClassifyError, and the
+// kit runtime's stream-close error_detail passes the mapped
+// *pluginabi.Error through MapError with the scoped pair intact.
+func TestExecutorStreamQuotaErrorIsCredentialScoped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Synthetic-Quotas", `{"planWeeklyLimit":{"percentRemaining":0,"nextRegenAt":"2030-01-01T00:00:00Z"}}`)
+		w.WriteHeader(429)
+		_, _ = w.Write([]byte(`{"error":"fixture upstream error"}`))
+	}))
+	defer server.Close()
+	r := pluginapi.ExecutorRequest{Payload: []byte(`{"model":"synthetic/syn:small:text","stream":true}`), StorageJSON: []byte(`{"api_key":"example-key"}`), HTTPClient: mockHostClient{server}}
+	_, err := newExecutor(nil).ExecuteStream(context.Background(), r)
+	var e *pluginabi.Error
+	if !errors.As(err, &e) {
+		t.Fatalf("stream error not typed: %v", err)
+	}
+	if !e.CredentialScoped || e.HTTPStatus != 429 || e.RetryAfterSeconds <= 0 {
+		t.Fatalf("scoped stream error %+v", e)
+	}
+	remapped := kit.MapError(err)
+	if !remapped.CredentialScoped || remapped.RetryAfterSeconds != e.RetryAfterSeconds || remapped.HTTPStatus != 429 {
+		t.Fatalf("error_detail mapping lost the scoped pair %+v", remapped)
 	}
 }
 
