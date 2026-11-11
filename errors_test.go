@@ -51,8 +51,7 @@ func TestClassifyFailure(t *testing.T) {
 }
 
 // TestClassifyFailureScopedRetryAfter pins the exact reset-derived
-// RetryAfterSeconds on the scoped branch under a fixed now, including the
-// server Retry-After precedence and the fresh cached reading path.
+// RetryAfterSeconds on the scoped branch under a fixed now.
 func TestClassifyFailureScopedRetryAfter(t *testing.T) {
 	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 	// Header regen 61.4s away rounds up to 62; credential scope is set.
@@ -74,28 +73,24 @@ func TestClassifyFailureScopedRetryAfter(t *testing.T) {
 	if !e.CredentialScoped || e.RetryAfterSeconds != 8 {
 		t.Fatalf("server Retry-After precedence %+v", e)
 	}
-	// A fresh cached reading supplies regen evidence on a header-less 429.
+	// A bound cached reading supplies regen evidence on a header-less 429.
 	cached := []quotaReading{{NextRegenAt: now.Add(90 * time.Second)}}
-	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, cached, true)
+	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, cached, cached)
 	if !e.CredentialScoped || e.RetryAfterSeconds != 90 {
 		t.Fatalf("cached regen evidence %+v", e)
 	}
-	// A cached 0% (non-nil) reading with a future regen scopes via the regen arm.
 	zero := float64(0)
-	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, []quotaReading{{PercentRemaining: &zero, NextRegenAt: now.Add(90 * time.Second)}}, true)
+	boundZero := []quotaReading{{PercentRemaining: &zero, NextRegenAt: now.Add(90 * time.Second)}}
+	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, boundZero, boundZero)
 	if !e.CredentialScoped || e.RetryAfterSeconds != 90 {
 		t.Fatalf("cached zero with future regen must scope %+v", e)
 	}
-	// A cached positive-percent reading with a future regen is not exhaustion
-	// evidence on a header-less generic 429; the regen still sets the retry
-	// hint but never the scope flag.
 	positive := float64(10)
-	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, []quotaReading{{PercentRemaining: &positive, NextRegenAt: now.Add(90 * time.Second)}}, true)
+	boundPositive := []quotaReading{{PercentRemaining: &positive, NextRegenAt: now.Add(90 * time.Second)}}
+	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, boundPositive, boundPositive)
 	if e.CredentialScoped || e.RetryAfterSeconds != 90 {
 		t.Fatalf("cached positive percent with future regen must stay model-scoped %+v", e)
 	}
-	// A header positive-percent reading with a future regen likewise never
-	// scopes on regen alone.
 	e = classifyFailure(pluginapi.HTTPResponse{
 		StatusCode: 429,
 		Headers:    http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":10,"nextRegenAt":"2030-01-01T00:01:01.4Z"}}`}},
@@ -103,41 +98,39 @@ func TestClassifyFailureScopedRetryAfter(t *testing.T) {
 	if e.CredentialScoped || e.RetryAfterSeconds != 62 {
 		t.Fatalf("header positive percent with future regen must stay model-scoped %+v", e)
 	}
-	// A cached 0% reading with no regen is not scope evidence on its own.
-	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, []quotaReading{{PercentRemaining: &zero}}, true)
+	boundZeroNoRegen := []quotaReading{{PercentRemaining: &zero}}
+	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, boundZeroNoRegen, boundZeroNoRegen)
 	if e.CredentialScoped || e.RetryAfterSeconds != 60 {
 		t.Fatalf("cached zero without regen must stay model-scoped %+v", e)
 	}
-	// A past regen is no evidence.
-	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, []quotaReading{{NextRegenAt: now.Add(-time.Minute)}}, true)
+	boundPast := []quotaReading{{NextRegenAt: now.Add(-time.Minute)}}
+	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, boundPast, boundPast)
 	if e.CredentialScoped || e.RetryAfterSeconds != 60 {
 		t.Fatalf("past regen must stay model-scoped %+v", e)
 	}
-	// An unbound cached reading — a header observation carries no credential
-	// material — keeps its retry hint but never authorizes credential scope,
-	// even when it reports 0% with a future regen.
-	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, []quotaReading{{PercentRemaining: &zero, NextRegenAt: now.Add(90 * time.Second)}}, false)
+	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, []quotaReading{{PercentRemaining: &zero, NextRegenAt: now.Add(90 * time.Second)}}, nil)
 	if e.CredentialScoped || e.RetryAfterSeconds != 90 {
 		t.Fatalf("unbound cached reading must stay a retry hint only %+v", e)
 	}
-	// Unbound or not, a cached body marker still scopes: it is response-local
-	// evidence, independent of any cached reading.
-	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}, Body: []byte(`{"error":"weekly credits exhausted"}`)}, now, []quotaReading{{PercentRemaining: &positive, NextRegenAt: now.Add(90 * time.Second)}}, false)
+	// A body marker still scopes on response-local evidence; an unbound
+	// hint's exhausted refill may time it without authorizing it.
+	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}, Body: []byte(`{"error":"weekly credits exhausted"}`)}, now, []quotaReading{{PercentRemaining: &positive, NextRegenAt: now.Add(90 * time.Second)}}, nil)
 	if !e.CredentialScoped {
 		t.Fatalf("response-local quota marker must still scope %+v", e)
+	}
+	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}, Body: []byte(`{"error":"weekly credits exhausted"}`)}, now, []quotaReading{{PercentRemaining: &zero, NextRegenAt: now.Add(120 * time.Second)}}, nil)
+	if !e.CredentialScoped || e.RetryAfterSeconds != 120 {
+		t.Fatalf("body marker scope must take the unbound exhausted refill timing %+v", e)
 	}
 }
 
 // TestClassifyFailureMultiBucketEvidence proves exhaustion evidence is
-// evaluated across every parsed bucket, and that a scoped cooldown's timing
-// comes from the exhausted buckets that supplied the evidence — never from a
-// positive bucket's routine refill tick.
+// evaluated across every parsed bucket and that a scoped cooldown is
+// timed by the exhausted buckets, never a positive bucket's tick.
 func TestClassifyFailureMultiBucketEvidence(t *testing.T) {
 	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	// Positive weekly credit beside an empty rolling-five-hour bucket: the
-	// second bucket's 0% scopes the credential and its own next tick times
-	// the cooldown — a positive first bucket's earlier regen must not
-	// release the credential before the empty bucket refills.
+	// Positive weekly beside an empty 5h bucket: the second bucket scopes
+	// and its own tick times the cooldown.
 	e := classifyFailure(pluginapi.HTTPResponse{
 		StatusCode: 429,
 		Body:       []byte("rate limited"),
@@ -147,8 +140,6 @@ func TestClassifyFailureMultiBucketEvidence(t *testing.T) {
 	if !e.CredentialScoped || e.RetryAfterSeconds != 60 {
 		t.Fatalf("exhausted second bucket must scope with its own refill timing %+v", e)
 	}
-	// Two exhausted buckets: the latest future regen bounds the cooldown
-	// because the credential cannot serve until every empty bucket refills.
 	e = classifyFailure(pluginapi.HTTPResponse{
 		StatusCode: 429,
 		Body:       []byte("rate limited"),
@@ -158,23 +149,28 @@ func TestClassifyFailureMultiBucketEvidence(t *testing.T) {
 	if !e.CredentialScoped || e.RetryAfterSeconds != 7200 {
 		t.Fatalf("cooldown must last until the latest exhausted bucket refills %+v", e)
 	}
-	// A fresh cached multi-bucket observation on a header-less 429 evaluates
-	// every shape: positive weekly + empty 5h scopes via the second bucket,
-	// timed by the exhausted bucket's regen.
 	positive := float64(50)
 	zero := float64(0)
-	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, []quotaReading{
+	mixed := []quotaReading{
 		{PercentRemaining: &positive, NextRegenAt: now.Add(30 * time.Second), Shape: "planWeeklyLimit"},
 		{PercentRemaining: &zero, NextRegenAt: now.Add(90 * time.Second), Shape: "rollingFiveHourLimit"},
-	}, true)
+	}
+	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, mixed, mixed)
 	if !e.CredentialScoped || e.RetryAfterSeconds != 90 {
 		t.Fatalf("cached exhausted second bucket must scope with its own refill timing %+v", e)
 	}
-	// Every bucket positive stays model-scoped: neither arm fires.
+	// A newer unbound hint must not hide a still-fresh bound poll.
 	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, []quotaReading{
+		{PercentRemaining: &positive, NextRegenAt: now.Add(45 * time.Second), Shape: "planWeeklyLimit"},
+	}, mixed)
+	if !e.CredentialScoped || e.RetryAfterSeconds != 90 {
+		t.Fatalf("newer unbound header must not shadow the bound poll's exhaustion %+v", e)
+	}
+	allPositive := []quotaReading{
 		{PercentRemaining: &positive, NextRegenAt: now.Add(30 * time.Second), Shape: "planWeeklyLimit"},
 		{PercentRemaining: &positive, Shape: "rollingFiveHourLimit"},
-	}, true)
+	}
+	e = classifyWithQuota(pluginapi.HTTPResponse{StatusCode: 429, Headers: http.Header{}}, now, allPositive, allPositive)
 	if e.CredentialScoped || e.RetryAfterSeconds != 30 {
 		t.Fatalf("all-positive buckets must stay model-scoped %+v", e)
 	}

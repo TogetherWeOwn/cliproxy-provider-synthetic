@@ -69,8 +69,7 @@ func TestExecutorExhaustionUsesFreshCachedRegenerationWithoutPolling(t *testing.
 	if !errors.As(err, &e) || e.Code != "quota_exhausted" || e.RetryAfterSeconds < 119 || e.RetryAfterSeconds > 120 {
 		t.Fatalf("cached regeneration not used %+v", err)
 	}
-	// A header observation carries no credential material, so it stays an
-	// unbound retry hint and can never scope whichever credential is current.
+	// Unbound header observations hint only and never scope.
 	if e.CredentialScoped {
 		t.Fatalf("unbound header observation must not scope the credential %+v", e)
 	}
@@ -83,11 +82,8 @@ func TestExecutorExhaustionUsesFreshCachedRegenerationWithoutPolling(t *testing.
 	}
 }
 
-// TestExecutorStreamQuotaErrorIsCredentialScoped proves the stream path
-// surfaces the same evidence-gated credential scope as Execute: a non-2xx
-// stream response classifies through the shared ClassifyError, and the
-// kit runtime's stream-close error_detail passes the mapped
-// *pluginabi.Error through MapError with the scoped pair intact.
+// The stream path surfaces the same credential scope as Execute, and
+// MapError keeps the scoped pair for the stream-close error_detail.
 func TestExecutorStreamQuotaErrorIsCredentialScoped(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Synthetic-Quotas", `{"planWeeklyLimit":{"percentRemaining":0,"nextRegenAt":"2030-01-01T00:00:00Z"}}`)

@@ -30,6 +30,7 @@ func (e executor) forAuth(id string, storage []byte, meta map[string]any) kit.Pa
 		// stream is still fresh evidence when the 429 classifies.
 		hint, bound := e.quota.latestReadings(id, digest)
 		return classifyWithQuota(resp, time.Now(), hint, bound)
+
 	}
 	return p
 }

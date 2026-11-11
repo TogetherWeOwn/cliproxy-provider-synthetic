@@ -154,15 +154,21 @@ effective reading (response, or fresh cached evidence bound to this
 credential generation when the response carries none) that does not
 affirmatively show credit left — `percentRemaining` absent or at or below
 zero — or a quota marker (`quota`/`credit`) in the first 4 KiB of the
-lowercased body. Exhaustion evidence is evaluated across every
-parsed quota bucket, not only the first: a header reporting positive weekly
-credit beside an empty rolling-five-hour bucket still scopes the credential,
-and the scoped cooldown is then timed by the latest future regen among the
-exhausted buckets — never by a positive bucket's routine refill tick — so the
-credential does not resume before every empty bucket refills. `NextRegenAt` is a routine incremental-refill tick present at every
-balance level, so a reading reporting credit remaining never scopes on regen
-alone. A header-less generic 429 with no such evidence stays model-scoped
-with its flat 60-second hint.
+lowercased body. A `UsageRecord` header observation carries no credential
+material, so it stays unbound: it never scopes any generation — but a
+still-fresh bound poll is tracked separately, so a newer unbound header can
+never hide a bound poll's exhaustion evidence. Exhaustion evidence is
+evaluated across every parsed quota bucket, not only the first: a header
+reporting positive weekly credit beside an empty rolling-five-hour bucket
+still scopes the credential. The scoped cooldown is timed by the latest
+future regen among the exhausted buckets of the source that authorized the
+scope — never by a positive bucket's routine refill tick — so the
+credential does not resume before every empty bucket refills; a marker-only
+scope may still take the newest observation's exhausted refill for timing.
+`NextRegenAt` is a routine incremental-refill tick present at every balance
+level, so a reading reporting credit remaining never scopes on regen alone.
+A header-less generic 429 with no such evidence stays model-scoped with its
+flat 60-second hint.
 
 ### Pinned host RPC limitation
 

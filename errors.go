@@ -26,9 +26,9 @@ func quotaBodyMarker(body string) bool {
 }
 
 func classifyFailure(resp pluginapi.HTTPResponse, now time.Time) *pluginabi.Error {
-	return classifyWithQuota(resp, now, nil, false)
+	return classifyWithQuota(resp, now, nil, nil)
 }
-func classifyWithQuota(resp pluginapi.HTTPResponse, now time.Time, cached []quotaReading, cachedBound bool) *pluginabi.Error {
+func classifyWithQuota(resp pluginapi.HTTPResponse, now time.Time, hint []quotaReading, bound []quotaReading) *pluginabi.Error {
 	e := &pluginabi.Error{Code: "upstream_error", Message: "Synthetic request failed", HTTPStatus: resp.StatusCode, RetryAfterSeconds: kit.RetryAfterSeconds(resp.Headers.Get("Retry-After"), now)}
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
@@ -43,19 +43,19 @@ func classifyWithQuota(resp pluginapi.HTTPResponse, now time.Time, cached []quot
 		e.Retryable = true
 		readings, hasHeader := quotaReadingsFromHeaders(resp.Headers)
 		if !hasHeader {
-			readings = cached
+			readings = hint
 		}
 		var reading quotaReading
 		if len(readings) > 0 {
 			reading = readings[0]
 		}
-		// Scope evidence is the response's own header, or a cached reading
+		// Scope evidence is the response's own header, or cached readings
 		// bound to this credential generation. A header observation carries
-		// no credential material, so a cached-but-unbound one stays a retry
+		// no credential material, so an unbound cached one stays a retry
 		// hint only: it cannot cool whichever key happens to be current.
-		evidence := readings
-		if !hasHeader && !cachedBound {
-			evidence = nil
+		scopeEvidence := bound
+		if hasHeader {
+			scopeEvidence = readings
 		}
 		body := strings.ToLower(string(resp.Body))
 		// Only a response-local positive-credit header vouches for concurrency.
@@ -69,39 +69,44 @@ func classifyWithQuota(resp pluginapi.HTTPResponse, now time.Time, cached []quot
 			// reading that does NOT affirmatively show credit remaining —
 			// percentRemaining absent or <= 0 — or a quota marker in the
 			// bounded lowercased body. Exhaustion evidence is checked across
-			// every parsed bucket, not only the first, because a header can
-			// report positive weekly credit beside an empty rolling-five-hour
-			// bucket that still means the credential cannot serve. NextRegenAt
-			// is a routine incremental-refill tick present at every balance
-			// level, so a reading that reports credit left is never exhaustion
-			// evidence on regen alone; a server Retry-After can also override
-			// the timing, so the arm keys on the reading, not on which source
-			// produced RetryAfterSeconds. A header-less generic 429 falling
-			// back to the flat 60s with none of those stays model-scoped —
-			// cooling the whole credential on an unclassified 429 repeats the
-			// opposite bug. A 0% cached-only reading without a regen never
-			// scopes. When evidence comes from a non-first bucket, the
-			// cooldown is timed by the exhausted buckets' regens, not the
-			// first bucket's.
-			exhaustedAt := time.Time{}
-			for _, r := range evidence {
+			// every parsed bucket: a header can report positive weekly credit
+			// beside an empty rolling-five-hour bucket. NextRegenAt is a
+			// routine refill tick at every balance level, so credit left is
+			// never exhaustion evidence on regen alone; a server Retry-After
+			// can override timing, so the arm keys on the reading. A
+			// header-less generic 429 with none of those stays model-scoped.
+			exhaustedRegen := func(rs []quotaReading) time.Time {
+				var latest time.Time
+				for _, r := range rs {
+					if r.NextRegenAt.After(now) && (r.PercentRemaining == nil || *r.PercentRemaining <= 0) && r.NextRegenAt.After(latest) {
+						latest = r.NextRegenAt
+					}
+				}
+				return latest
+			}
+			for _, r := range scopeEvidence {
 				if hasHeader && r.PercentRemaining != nil && *r.PercentRemaining <= 0 {
 					e.CredentialScoped = true
 				}
-				exhausted := r.PercentRemaining == nil || *r.PercentRemaining <= 0
-				if exhausted && r.NextRegenAt.After(now) {
+				if (r.PercentRemaining == nil || *r.PercentRemaining <= 0) && r.NextRegenAt.After(now) {
 					e.CredentialScoped = true
-					// The latest future regen among buckets without
-					// affirmative credit bounds the cooldown: the credential
-					// cannot serve until every empty bucket refills, never on
-					// a positive bucket's routine refill tick.
-					if r.NextRegenAt.After(exhaustedAt) {
-						exhaustedAt = r.NextRegenAt
-					}
 				}
 			}
 			if quotaBodyMarker(body[:min(len(body), maxQuotaMarkerScan)]) {
 				e.CredentialScoped = true
+			}
+			// Cooldown timing follows the source that authorized the scope:
+			// its own exhausted buckets' latest future regen. A marker-only
+			// scope may still take the newest observation's exhausted refill
+			// for timing — an unbound hint times without authorizing scope.
+			exhaustedAt := time.Time{}
+			if hasHeader {
+				exhaustedAt = exhaustedRegen(readings)
+			} else if at := exhaustedRegen(bound); !at.IsZero() {
+				exhaustedAt = at
+			}
+			if exhaustedAt.IsZero() && e.CredentialScoped {
+				exhaustedAt = exhaustedRegen(readings)
 			}
 			// Timing falls back to the first parsed reading only for an
 			// unscoped 429, which keeps the first reading's

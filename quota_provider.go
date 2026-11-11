@@ -106,29 +106,28 @@ func (q *quotaProvider) FetchQuota(ctx context.Context, req pluginapi.QuotaFetch
 // latest returns the first shape from the newest matching generation or
 // unbound header, preserving the historical first-match RetryAfter hint.
 func (q *quotaProvider) latest(id string, cred [32]byte) *quotaReading {
-	readings, _ := q.latestReadings(id, cred)
-	if len(readings) == 0 {
+	hint, _ := q.latestReadings(id, cred)
+	if len(hint) == 0 {
 		return nil
 	}
-	return &readings[0]
+	return &hint[0]
 }
 
-// latestReadings returns every shape from the newest matching observation —
-// a generation-bound poll, or an unbound header observation — so a 429's
-// exhaustion evidence is evaluated across all buckets, not only the one
-// driving the retry hint. bound reports whether the newest observation was
-// recorded for this credential generation: a UsageRecord carries no
-// credential material, so header observations stay unbound and may supply
-// the retry hint but never the credential-scope flag.
-func (q *quotaProvider) latestReadings(id string, cred [32]byte) (readings []quotaReading, bound bool) {
+// latestReadings returns every shape from two observations: hint is the
+// newest matching observation of any kind (bound poll or unbound header)
+// and supplies retry timing; bound is the newest observation recorded for
+// this credential generation or nil. A UsageRecord carries no credential
+// material, so an unbound header may hint but never scope — and a newer
+// unbound header cannot hide a still-fresh bound poll's evidence.
+func (q *quotaProvider) latestReadings(id string, cred [32]byte) (hint []quotaReading, bound []quotaReading) {
 	if q == nil {
-		return nil, false
+		return nil, nil
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	now := q.clock()
 	var best *timedReading
-	var bestBound bool
+	var bestBound *timedReading
 	for key, r := range q.readings {
 		if key.id != id {
 			continue
@@ -143,15 +142,19 @@ func (q *quotaProvider) latestReadings(id string, cred [32]byte) (readings []quo
 		if best == nil || r.observedAt.After(best.observedAt) {
 			entry := r
 			best = &entry
-			bestBound = key.hasCred
+		}
+		if key.hasCred && (bestBound == nil || r.observedAt.After(bestBound.observedAt)) {
+			entry := r
+			bestBound = &entry
 		}
 	}
-	if best == nil || len(best.readings) == 0 {
-		return nil, false
+	if best != nil && len(best.readings) > 0 {
+		hint = append([]quotaReading(nil), best.readings...)
 	}
-	out := make([]quotaReading, len(best.readings))
-	copy(out, best.readings)
-	return out, bestBound
+	if bestBound != nil && len(bestBound.readings) > 0 {
+		bound = append([]quotaReading(nil), bestBound.readings...)
+	}
+	return hint, bound
 }
 
 func quotaIdentity(id, index string) string {
