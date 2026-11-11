@@ -16,7 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
-// Fixture tests for the kit ModelCatalog migration (kit v0.5.0), adapted to
+// Fixture tests for the kit ModelCatalog migration (kit v0.6.0), adapted to
 // this plugin's fetch shape: one OpenAI-style GET /openai/v1/models through
 // the host HTTP client, Bearer auth per request, the synthetic/ namespace,
 // the syn:/infinite:/hf: allow globs with embedding models denied, and the

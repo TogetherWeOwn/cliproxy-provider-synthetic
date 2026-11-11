@@ -89,10 +89,14 @@ separate authorization; they are not performed by the test or packaging tools.
 5. Verify inference-header observations update the quota card without a poll.
 6. Confirm native routing across distinct auths and sibling isolation for payment
    errors. Re-run mock concurrency/exhaustion tests on the proposed host version.
-   **The current v8.0.49 RPC bridge cannot preserve the native transient marker:**
-   its concurrency-only 429 still becomes model quota-exceeded state. Do not
-   accept native parity or proceed to cutover until the upstream contract and
-   pinned compatibility test are updated. No local core patch is supplied.
+   **The current v8.0.63 RPC bridge cannot preserve the native transient
+   marker:** the plugin reports a concurrency-only 429 with code
+   `concurrency_limit`, but the v8.0.63 adapter only recognizes
+   `transient_rate_limit` (`rpc_client.go` `IsTransientRateLimit`), so the
+   error falls into the generic 429 path and still becomes model
+   quota-exceeded state. Do not accept native parity or proceed to cutover
+   until the upstream contract and pinned compatibility test are updated.
+   No local core patch is supplied.
 
 ## 5. Cut over Synthetic only
 

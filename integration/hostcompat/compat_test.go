@@ -42,7 +42,7 @@ func (models) RegisterClient(string, string, []*registry.ModelInfo) {}
 func (models) UnregisterClient(string)                              {}
 func (models) GetModelProviders(string) []string                    { return nil }
 
-// The actual v8.0.49 loader performs dlopen, C-ABI registration, RPC dispatch,
+// The actual v8.0.63 loader performs dlopen, C-ABI registration, RPC dispatch,
 // persistence and executor/usage adapters. Only the upstream is an httptest mock.
 func TestRealHostLoader(t *testing.T) {
 	var polls atomic.Int32
@@ -152,7 +152,7 @@ func TestRealHostLoader(t *testing.T) {
 		t.Fatalf("registration %+v", host.RegisteredPlugins())
 	}
 	info := host.RegisteredPlugins()
-	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.4" {
+	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.5" {
 		t.Fatalf("metadata %+v", info)
 	}
 	// Without an AuthProvider the host leaves the parse unhandled and the auth
@@ -264,13 +264,13 @@ func TestRealHostLoader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var chunks strings.Builder
+	var chunks []string
 	select {
 	case c := <-stream.Chunks:
 		if c.Err != nil || len(c.Payload) == 0 {
 			t.Fatalf("first chunk %+v", c)
 		}
-		chunks.Write(c.Payload)
+		chunks = append(chunks, string(c.Payload))
 		close(gate)
 	case <-ctx.Done():
 		t.Fatal("stream buffered until completion")
@@ -279,16 +279,27 @@ func TestRealHostLoader(t *testing.T) {
 		if c.Err != nil {
 			t.Fatal(c.Err)
 		}
-		chunks.Write(c.Payload)
+		chunks = append(chunks, string(c.Payload))
 	}
 	// The kit re-frames to one data event per chunk and drops the SSE
 	// [DONE] marker (the host appends its own terminator): the stream ends
-	// by channel close. The core-executor call carries no chat route, so
-	// the chunks stay data-framed.
-	if want := `data: {"id":"chat-example","object":"chat.completion.chunk","model":"syn:small:text","choices":[{"index":0,"delta":{"role":"assistant","content":"hel"},"finish_reason":null}]}` +
-		`data: {"id":"chat-example","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}` +
-		`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`; chunks.String() != want {
-		t.Fatalf("stream %q want %q", chunks.String(), want)
+	// by channel close. The v8.0.63 host deframes same-format SSE chunks
+	// before stream translation, so the core-executor call surfaces each
+	// event as one bare-JSON chunk with no data: prefix or blank-line
+	// separators. Each event must remain its own chunk: the host wraps every
+	// chunk in one data: event, so a merged pair would emit invalid JSON.
+	want := []string{
+		`{"id":"chat-example","object":"chat.completion.chunk","model":"syn:small:text","choices":[{"index":0,"delta":{"role":"assistant","content":"hel"},"finish_reason":null}]}`,
+		`{"id":"chat-example","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+	}
+	if len(chunks) != len(want) {
+		t.Fatalf("stream chunks %d want %d: %q", len(chunks), len(want), chunks)
+	}
+	for i, w := range want {
+		if chunks[i] != w {
+			t.Fatalf("stream chunk %d %q want %q", i, chunks[i], w)
+		}
 	}
 	opts.Stream = false
 	for _, tc := range []struct {
@@ -370,13 +381,16 @@ func TestRealHostLoader(t *testing.T) {
 		}
 		got, _ := mgr.GetByID(one.ID)
 		state := got.ModelStates[model]
-		// This pins an upstream limitation rather than pretending the plugin can
-		// carry the native transient marker over ABI 1/schema 10. Remove this
-		// characterization when a pinned host exposes that marker in RPC errors.
+		// This pins a plugin-side mismatch rather than pretending the RPC
+		// contract carries the native transient marker over ABI 1/schema 10:
+		// the plugin emits "concurrency_limit" but the v8.0.63 adapter only
+		// recognizes transient_rate_limit, so the 429 lands in the generic
+		// quota-exceeded path. Remove this characterization when the plugin
+		// code and adapter contract line up.
 		if state == nil || !state.Quota.Exceeded {
 			t.Fatalf("pinned host behavior changed; revisit documented RPC limitation: %+v", state)
 		}
-		t.Log("v8.0.49 RPC drops the transient marker and marks concurrency 429 as model quota exceeded")
+		t.Log("v8.0.63 recognizes only transient_rate_limit; plugin concurrency_limit still marks the 429 model quota exceeded")
 	})
 	for _, prefix := range []string{" /acct/ ", "synthetic", " /synthetic/ "} {
 		t.Run("pinned prefix routes and strips end to end/"+prefix, func(t *testing.T) {
@@ -450,7 +464,7 @@ func TestRegistryUsesNativeStoreSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg, err := pluginstore.ParseRegistry(raw)
-	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "synthetic" || reg.Plugins[0].Version != "0.2.4" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
+	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "synthetic" || reg.Plugins[0].Version != "0.2.5" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
 		t.Fatalf("registry %+v %v", reg, err)
 	}
 }
